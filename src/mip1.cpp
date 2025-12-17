@@ -15,7 +15,7 @@ int main(int argc, char** argv) {
                  x +   y       >= 1
                  x, y, z binary
 */
-//  这是一个用于测试 Gurobi C++ 接口的简单 MIP 模型示例。
+//  这是一个用于测试 Gurobi C++ 接口的简单 MIP 模型示例。111
 #include "gurobi_c++.h"
 
 using std::cout;
