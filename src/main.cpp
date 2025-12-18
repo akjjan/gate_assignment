@@ -4,6 +4,7 @@
 #include <vector>
 #include <set>
 #include <map>
+#include <algorithm>
 
 using std::map;
 using std::set;
@@ -46,7 +47,7 @@ set<int> Departure_flights_indices;
 // 离开航班索引  F_d
 
 map<int, int> arrival_to_departure_map;
-//  \delta 映射 ： 到达航班ID到离开航班ID的映射
+//  \delta 映射 ： 到达航班ID -> 离开航班ID
 
 set<int> MediumGates; // 中等大小登机口集合
 
@@ -55,28 +56,114 @@ set<int> LargeFlights; // 大型飞机航班集合
 vector<vector<double>> TowCost(GateNumber + 1, vector<double>(GateNumber + 1, 50.0));
 // 拖行成本
 
-auto solve_subproblem(GRBEnv const &env, const vector<vector<GRBVar>> &x)
+bool operator<(const Flight &a, const Flight &b)
 {
+    return a.scheduled_time < b.scheduled_time;
+}
+
+auto &determine_Y(const vector<vector<GRBVar>> &x)
+{
+    // 根据 x 计算 Y
+
+    vector<vector<vector<uint8_t>>> Y(FlightNumber, vector<vector<uint8_t>>(FlightNumber, vector<uint8_t>(GateNumber, 0)));
+    // Y[i][j][k] = 1 表示 航班 i 和 j 在登机口 k 连续执行
+
+    map<int, vector<Flight>> flights_in_gate;
+
+    for (int i = 0; i < FlightNumber; ++i)
+    {
+        for (int j = 0; j < GateNumber; ++j)
+        {
+            if (x[i][j].get(GRB_DoubleAttr_X) > 0.5)
+            {
+                flights_in_gate[j].push_back(flights[i]);
+            }
+        }
+    }
+
+    for (auto &[gate, flight_list] : flights_in_gate)
+    {
+        // 按计划时间排序
+        std::sort(flight_list.begin(), flight_list.end());
+
+        for (size_t idx = 0; idx + 1 < flight_list.size(); ++idx)
+        {
+            int i = flight_list[idx].flight_id;
+            int j = flight_list[idx + 1].flight_id;
+            Y[i][j][gate] = 1;
+        }
+    }
+
+    return Y;
+}
+
+auto solve_towcost_subproblem(GRBEnv const &env, const vector<vector<GRBVar>> &x)
+{
+
+    auto &F_a_up = Have_departue_arrival_flights_indices;
+    // 起个别名方便书写
 
     auto sub_m = GRBModel(env);
 
+    sub_m.set(GRB_IntAttr_ModelSense, GRB_MINIMIZE); // 最小化
+
     // z_i_u_v 变量表示航班 i 是否从登机口 u 拖行到登机口 v
+    vector<vector<vector<GRBVar>>> z(F_a_up.size(), vector<vector<GRBVar>>(GateNumber + 1, vector<GRBVar>(GateNumber + 1)));
 
-    vector<vector<vector<GRBVar>>> z(Have_departue_arrival_flights_indices.size(), vector<vector<GRBVar>>(GateNumber + 1, vector<GRBVar>(GateNumber + 1)));
-
-    for (auto i : Have_departue_arrival_flights_indices)
+    for (auto i : F_a_up)
     {
-        int idx = std::distance(Have_departue_arrival_flights_indices.begin(),
-                                Have_departue_arrival_flights_indices.find(i));
+        int idx = std::distance(F_a_up.begin(),
+                                F_a_up.find(i));
+        auto delta_i = arrival_to_departure_map[i];
         for (int u = 0; u <= GateNumber; ++u)
         {
             for (int v = 0; v <= GateNumber; ++v)
             {
-                auto varName = "z_" + to_string(i) + "_" + to_string(arrival_to_departure_map[i]) + "_" + to_string(u) + "_" + to_string(v);
+                auto varName = "z_" + to_string(i) + "_" + to_string(delta_i) + "_" + to_string(u) + "_" + to_string(v);
                 z[idx][u][v] = sub_m.addVar(0.0, 1.0, TowCost[u][v], GRB_BINARY, varName);
             }
         }
     }
+
+    auto Y = determine_Y(x);
+
+    for (auto i : F_a_up)
+    {
+        for (int u = 0; u <= GateNumber; ++u)
+        {
+            for (int v = 0; v <= GateNumber; ++v)
+            {
+                int idx = std::distance(F_a_up.begin(),
+                                        F_a_up.find(i));
+                auto delta_i = arrival_to_departure_map[i];
+                if (u == v)
+                {
+                    sub_m.addConstr(x[i][u] + x[delta_i][v] - Y[i][delta_i][u] <= z[idx][u][u] + 1);
+                    // 约束3-12
+                }
+                else
+                {
+                    sub_m.addConstr(z[idx][u][v] <= x[i][u]);
+                    sub_m.addConstr(z[idx][u][v] <= x[delta_i][v]);
+                    sub_m.addConstr(x[i][u] + x[delta_i][v] <= z[idx][u][v] + 1);
+                    // 约束3-9  3-10  3-11
+                }
+            }
+        }
+    }
+
+    sub_m.optimize();
+
+    return sub_m.get(GRB_DoubleAttr_ObjVal);
+}
+
+auto solve_delaycost_subproblem(GRBEnv const &env, const vector<vector<GRBVar>> &x)
+{
+    // 计算期望延误成本 E(x)
+
+    auto sub_m = GRBModel(env);
+
+    sub_m.set(GRB_IntAttr_ModelSense, GRB_MINIMIZE); // 最小化
 }
 
 int main()
@@ -132,7 +219,7 @@ int main()
     {
         for (auto k : MediumGates)
         {
-            m.addConstr(x[i][k] == 0, "LargeFlightMediumGateConstr_" + to_string(i) + "_" + to_string(k));
+            m.addConstr(x[i][k] == 0, "Flight-GateConstr_" + to_string(i) + "_" + to_string(k));
         }
     } // 大型飞机不能分配到中等大小登机口
 
