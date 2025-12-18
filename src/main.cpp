@@ -5,6 +5,8 @@
 #include <set>
 #include <map>
 
+using std::vector;
+
 enum FlightType
 {
     ARRIVAL,
@@ -69,6 +71,24 @@ int main()
             x[i][k].set(GRB_DoubleAttr_Obj, TowCost[k][GateNumber]);
         }
     } // 对于到达后不离开的航班，设置拖行成本
+
+    // z_i_u_v 变量表示航班 i 是否从登机口 u 拖行到登机口 v
+
+    vector<vector<vector<GRBVar>>> z(Have_departue_arrival_flights_indices.size(), vector<vector<GRBVar>>(GateNumber + 1, vector<GRBVar>(GateNumber + 1)));
+
+    for (auto i : Have_departue_arrival_flights_indices)
+    {
+        int idx = std::distance(Have_departue_arrival_flights_indices.begin(),
+                                Have_departue_arrival_flights_indices.find(i));
+        for (int u = 0; u <= GateNumber; ++u)
+        {
+            for (int v = 0; v <= GateNumber; ++v)
+            {
+                auto varName = "z_" + std::to_string(i) + "_" + std::to_string(arrival_to_departure_map[i]) + "-" + std::to_string(u) + "_" + std::to_string(v);
+                z[idx][u][v] = m.addVar(0.0, 1.0, TowCost[u][v], GRB_BINARY, varName);
+            }
+        }
+    }
 
     return 0;
 }
