@@ -61,7 +61,7 @@ bool operator<(const Flight &a, const Flight &b)
     return a.scheduled_time < b.scheduled_time;
 }
 
-auto &determine_Y(const vector<vector<GRBVar>> &x)
+auto determine_Y(const vector<vector<GRBVar>> &x)
 {
     // 根据 x 计算 Y
 
