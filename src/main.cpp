@@ -1,4 +1,7 @@
 #include "gurobi_c++.h"
+
+#include "modelDef.h"
+
 #include <iostream>
 #include <string>
 #include <vector>
@@ -11,37 +14,18 @@ using std::set;
 using std::to_string;
 using std::vector;
 
-enum FlightType
-{
-    ARRIVAL,
-    DEPARTURE
-}; // 枚举类型表示航班类型
-
-enum AircraftSize
-{
-    MEDIUM,
-    LARGE
-}; // 枚举类型表示飞机大小
-
-struct Flight
-{
-    int flight_id;              // 航班ID
-    FlightType flight_type;     // 类型
-    AircraftSize aircraft_size; // 飞机大小
-    int scheduled_time;         // 计划时间
-};
-
-const int FlightNumber = 500; // 全局变量，航班数量
+const int FlightNumber = 400; // 全局变量，航班数量
 
 const int GateNumber = 50; // 全局变量，登机口数量
+
+constexpr int ApronIndex = GateNumber; // 明确停机坪索引
 
 vector<double> ApronPenaltyCost(FlightNumber, 10.0); // 每个航班的停机坪惩罚成本
 
 vector<Flight> flights(FlightNumber); // 航班信息列表
 
-set<int> No_departue_arrival_flights_indices;   // \underline{F_a}
-set<int> Have_departue_arrival_flights_indices; // \overline{F_a}
-// 分别存储到达后不离开和有离开的  到达航班索引
+set<int> No_departue_arrival_flights_indices;   // \underline{F_a}  不离开的到达航班索引
+set<int> Have_departue_arrival_flights_indices; // \overline{F_a}   有离开的到达航班索引
 
 set<int> Departure_flights_indices;
 // 离开航班索引  F_d
@@ -56,16 +40,18 @@ set<int> LargeFlights; // 大型飞机航班集合
 vector<vector<double>> TowCost(GateNumber + 1, vector<double>(GateNumber + 1, 50.0));
 // 拖行成本
 
+using Succession = vector<vector<vector<uint8_t>>>; // 连续执行关系的类型别名
+
 bool operator<(const Flight &a, const Flight &b)
 {
     return a.scheduled_time < b.scheduled_time;
 }
 
-auto determine_Y(const vector<vector<GRBVar>> &x)
+Succession determine_Y(const vector<vector<GRBVar>> &x)
 {
     // 根据 x 计算 Y
 
-    vector<vector<vector<uint8_t>>> Y(FlightNumber, vector<vector<uint8_t>>(FlightNumber, vector<uint8_t>(GateNumber, 0)));
+    Succession Y(FlightNumber, vector<vector<uint8_t>>(FlightNumber, vector<uint8_t>(GateNumber, 0)));
     // Y[i][j][k] = 1 表示 航班 i 和 j 在登机口 k 连续执行
 
     map<int, vector<Flight>> flights_in_gate;
@@ -194,7 +180,7 @@ int main()
     {
         for (int k = 0; k < GateNumber; ++k)
         {
-            x[i][k].set(GRB_DoubleAttr_Obj, TowCost[k][GateNumber]);
+            x[i][k].set(GRB_DoubleAttr_Obj, TowCost[k][ApronIndex]);
         }
     } // 对于到达后不离开的航班，设置拖行到停机坪的成本
 
