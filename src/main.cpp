@@ -2,6 +2,8 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <set>
+#include <map>
 
 enum FlightType
 {
@@ -9,15 +11,33 @@ enum FlightType
     DEPARTURE
 }; // 枚举类型表示航班类型
 
-struct flight
+struct Flight
 {
-    int flight_id;
-    FlightType flight_type;
-    int scheduled_time;
-}; // 航班结构体, 包含航班ID、类型和计划时间
+    int flight_id;          // 航班ID
+    FlightType flight_type; // 类型
+    int scheduled_time;     // 计划时间
+};
 
 const int FlightNumber = 500; // 全局变量，航班数量
-const int GateNumber = 50;    // 全局变量，登机口数量
+
+const int GateNumber = 50; // 全局变量，登机口数量
+
+std::vector<double> ApronPenaltyCost(FlightNumber, 100.0); // 每个航班的停机坪惩罚成本
+
+std::vector<Flight> flights(FlightNumber); // 航班信息列表
+
+std::set<int> No_departue_arrival_flights_indices;   // \underline{F_a}
+std::set<int> Have_departue_arrival_flights_indices; // \overline{F_a}
+// 分别存储到达后不离开和有离开的  到达航班索引
+
+std::set<int> Departure_flights_indices;
+// 离开航班索引  F_d
+
+std::map<int, int> arrival_to_departure_map;
+//  \delta 映射 ： 到达航班ID到离开航班ID的映射
+
+std::vector<std::vector<double>> TowCost(GateNumber + 1, std::vector<double>(GateNumber + 1, 50.0));
+// 拖行成本
 
 int main()
 {
@@ -35,9 +55,20 @@ int main()
         for (int j = 0; j <= GateNumber; ++j)
         {
             std::string varName = "x_" + std::to_string(i) + "_" + std::to_string(j);
-            x[i][j] = m.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
+            if (j < GateNumber)
+                x[i][j] = m.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
+            else
+                x[i][j] = m.addVar(0.0, 1.0, ApronPenaltyCost[i], GRB_BINARY, varName); // 航班的停机坪惩罚成本
         }
     }
+
+    for (auto i : No_departue_arrival_flights_indices)
+    {
+        for (int k = 0; k < GateNumber; ++k)
+        {
+            x[i][k].set(GRB_DoubleAttr_Obj, TowCost[k][GateNumber]);
+        }
+    } // 对于到达后不离开的航班，设置拖行成本
 
     return 0;
 }
