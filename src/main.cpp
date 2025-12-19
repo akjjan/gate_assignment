@@ -244,7 +244,7 @@ int main() {
                           total_cost);
 
     // 添加割
-    /*  待补充 */
+    /*  待补充的内容 */
 
     LB = std::max(LB, m.get(GRB_DoubleAttr_ObjVal));
 
