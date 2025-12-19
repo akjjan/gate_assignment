@@ -43,3 +43,20 @@ struct successionKeyHash
         return std::hash<int>()(key.i) ^ std::hash<int>()(key.j) ^ std::hash<int>()(key.k);
     }
 };
+
+struct zKey
+{
+    int i, delta_i, u, v;
+    bool operator==(const zKey &other) const
+    {
+        return i == other.i && delta_i == other.delta_i && u == other.u && v == other.v;
+    }
+};
+
+struct zKeyHash
+{
+    std::size_t operator()(const zKey &key) const
+    {
+        return std::hash<int>()(key.i) ^ std::hash<int>()(key.delta_i) ^ std::hash<int>()(key.u) ^ std::hash<int>()(key.v);
+    }
+};

@@ -9,161 +9,193 @@
 #include <set>
 #include <map>
 #include <algorithm>
+#include <unordered_set>
 
 using std::map;
 using std::set;
 using std::to_string;
+using std::unordered_set;
 using std::vector;
 
 caseData makeSampleCaseData()
 {
-    int FlightNumber = 400;                                                               // 全局变量，航班数量
-    int GateNumber = 50;                                                                  // 全局变量，登机口数量
-    int ApronIndex = GateNumber;                                                          // 明确停机坪索引
-    vector<double> ApronPenaltyCost(FlightNumber, 10.0);                                  // 每个航班的停机坪惩罚成本
-    vector<Flight> flights(FlightNumber);                                                 // 航班信息列表
-    vector<int> No_departue_arrival_flights_indices;                                      // \underline{F_a}  不离开的到达航班索引
-    vector<int> Have_departue_arrival_flights_indices;                                    // \overline{F_a}   有离开的到达航班索引
-    vector<int> Departure_flights_indices;                                                // 离开航班索引  F_d
-    map<int, int> arrival_to_departure_map;                                               //  \delta 映射 ： 到达航班ID -> 离开航班ID
-    vector<int> MediumGates;                                                              // 中等大小登机口集合
-    vector<int> LargeFlights;                                                             // 大型飞机航班集合
-    vector<vector<double>> TowCost(GateNumber + 1, vector<double>(GateNumber + 1, 50.0)); // 拖行成本
+    int flightNumber = 500;                                                               // 全局变量，航班数量
+    int gateNumber = 50;                                                                  // 全局变量，登机口数量
+    int apronIndex = gateNumber;                                                          // 明确停机坪索引
+    int bufferTime = 15;                                                                  // 缓冲时间
+    vector<double> apronPenaltyCost(flightNumber, 100.0);                                 // 每个航班的停机坪惩罚成本
+    vector<Flight> flights(flightNumber);                                                 // 航班信息列表
+    vector<int> noDepartArr;                                                              // \underline{F_a}  不离开的到达航班索引
+    vector<int> haveDepartArr;                                                            // \overline{F_a}   有离开的到达航班索引
+    vector<int> departFlights;                                                            // 离开航班索引  F_d
+    map<int, int> delta;                                                                  //  \delta 映射 ： 到达航班ID -> 离开航班ID
+    vector<int> mediumGates;                                                              // 中等大小登机口集合
+    vector<int> largeFlights;                                                             // 大型飞机航班集合
+    vector<vector<double>> towCost(gateNumber + 1, vector<double>(gateNumber + 1, 50.0)); // 拖行成本
+    vector<vector<double>> towTime(gateNumber + 1, vector<double>(gateNumber + 1, 30.0)); // 拖行时间
 
-    return makeCaseData(FlightNumber, GateNumber,
-                        ApronPenaltyCost,
+    return makeCaseData(flightNumber, gateNumber, bufferTime,
+                        apronPenaltyCost,
                         flights,
-                        No_departue_arrival_flights_indices,
-                        Have_departue_arrival_flights_indices,
-                        Departure_flights_indices,
-                        arrival_to_departure_map,
-                        MediumGates,
-                        LargeFlights,
-                        TowCost);
+                        noDepartArr,
+                        haveDepartArr,
+                        departFlights,
+                        delta,
+                        mediumGates,
+                        largeFlights,
+                        towCost,
+                        towTime);
 }
 
-using Succession = vector<vector<vector<uint8_t>>>; // y_i_j_k的类型，连续执行关系的类型别名
-
-Succession determine_Y(const vector<vector<GRBVar>> &x,
-                       const vector<Flight> &flights,
-                       int FlightNumber,
-                       int GateNumber)
+map<int, vector<int>> get_flights_in_gate_map(const vector<vector<GRBVar>> &x)
 {
-    // 根据 x 计算 Y
-
-    Succession Y(FlightNumber, vector<vector<uint8_t>>(FlightNumber, vector<uint8_t>(GateNumber, 0)));
-    // Y[i][j][k] = 1 表示 航班 i 和 j 在登机口 k 连续执行
-
-    map<int, vector<Flight>> flights_in_gate;
-
+    map<int, vector<int>> flights_in_gate;
+    int FlightNumber = x.size();
+    int GateNumber = x[0].size() - 1;
     for (int i = 0; i < FlightNumber; ++i)
     {
-        for (int j = 0; j < GateNumber; ++j)
+        for (int j = 0; j <= GateNumber; ++j)
         {
             if (x[i][j].get(GRB_DoubleAttr_X) > 0.5)
             {
-                flights_in_gate[j].push_back(flights[i]);
+                flights_in_gate[j].push_back(i);
             }
         }
     }
 
-    for (auto &[gate, flight_list] : flights_in_gate)
+    return flights_in_gate;
+}
+
+using sparseSuccession = unordered_set<successionKey, successionKeyHash>;
+// y_i_j_k，连续执行关系的类型别名，稀疏存储
+
+sparseSuccession determine_Y(const vector<vector<GRBVar>> &x,
+                             const vector<Flight> &flights)
+{
+    // 根据 x 计算 Y
+    sparseSuccession Y;
+    // {i，j，k} in Y 表示 航班 i 和 j 在登机口 k 连续执行
+
+    auto flights_in_gate = get_flights_in_gate_map(x);
+
+    for (auto &[gate, indices] : flights_in_gate)
     {
         // 按计划时间排序
-        std::sort(flight_list.begin(), flight_list.end());
-
-        for (size_t idx = 0; idx + 1 < flight_list.size(); ++idx)
+        auto cmp = [&](int a, int b)
         {
-            int i = flight_list[idx].flight_id;
-            int j = flight_list[idx + 1].flight_id;
-            Y[i][j][gate] = 1;
+            return flights[a].scheduled_time < flights[b].scheduled_time;
+        };
+        std::sort(indices.begin(), indices.end(), cmp);
+        for (size_t idx = 0; idx + 1 < indices.size(); ++idx)
+        {
+            int i = indices[idx];
+            int j = indices[idx + 1];
+            Y.insert({i, j, gate});
         }
     }
 
     return Y;
 }
 
-auto solve_towcost_subproblem(GRBEnv const &env, const vector<vector<GRBVar>> &x, const caseData &d)
+map<int, int> get_idx_map(const vector<int> &F_a_up)
+{
+    map<int, int> idx_of;
+    for (size_t k = 0; k < F_a_up.size(); ++k)
+    {
+        idx_of[F_a_up[k]] = k;
+    }
+    return idx_of;
+}
+
+using sparseZ = unordered_set<zKey, zKeyHash>;
+// z_i_delta_i_u_v，稀疏存储
+
+double calculateTowCost(const GRBEnv &env, const caseData &d, const vector<vector<GRBVar>> &x, const sparseSuccession &Y, sparseZ &Z)
 {
 
     auto &F_a_up = d.haveDepartArr; // 有离开的到达航班索引
-    // 起个别名方便书写
+                                    // 起个别名方便书写
 
-    auto sub_m = GRBModel(env);
+    double tow_cost = 0.0;
 
-    sub_m.set(GRB_IntAttr_ModelSense, GRB_MINIMIZE); // 最小化
-
-    // z_i_u_v 变量表示航班 i 是否从登机口 u 拖行到登机口 v
-    vector<vector<vector<GRBVar>>> z(F_a_up.size(), vector<vector<GRBVar>>(d.gateNumber + 1, vector<GRBVar>(d.gateNumber + 1)));
+    int GateNumber = d.gateNumber;
 
     for (auto i : F_a_up)
     {
-        int idx = -1;
-        for (size_t k = 0; k < F_a_up.size(); ++k)
+        auto delta_i = d.delta.at(i); // 到港航班 i 对应的离开航班ID
+        for (int u = 0; u <= GateNumber; ++u)
         {
-            if (F_a_up[k] == i)
+            for (int v = 0; v <= GateNumber; ++v)
             {
-                idx = k;
-                break;
-            }
-        }
-        auto delta_i = d.delta.at(i);
-        for (int u = 0; u <= d.gateNumber; ++u)
-        {
-            for (int v = 0; v <= d.gateNumber; ++v)
-            {
-                auto varName = "z_" + to_string(i) + "_" + to_string(delta_i) + "_" + to_string(u) + "_" + to_string(v);
-                z[idx][u][v] = sub_m.addVar(0.0, 1.0, d.towCost[u][v], GRB_BINARY, varName);
+                if (u == v)
+                {
+                    if (x[i][u].get(GRB_DoubleAttr_X) > 0.5 and x[delta_i][u].get(GRB_DoubleAttr_X) > 0.5 and Y.count({i, delta_i, u}) == 0)
+                    {
+                        tow_cost += d.towCost[u][u]; // 同一登机口拖行成本
+                        Z.insert({i, delta_i, u, v});
+                    }
+                }
+                else
+                {
+                    if (x[i][u].get(GRB_DoubleAttr_X) > 0.5 and x[delta_i][v].get(GRB_DoubleAttr_X) > 0.5)
+                    {
+                        tow_cost += d.towCost[u][v]; // 不同登机口拖行成本
+                        Z.insert({i, delta_i, u, v});
+                    }
+                }
             }
         }
     }
 
-    auto Y = determine_Y(x, d.flights, d.flightNumber, d.gateNumber);
+    return tow_cost;
+}
 
-    for (auto i : F_a_up)
+double calculateDelayCost(const GRBEnv &env, const caseData &d, const vector<vector<GRBVar>> &x, const sparseSuccession &Y, const sparseZ &Z)
+{
+    // 计算延误成本
+    auto sub_m = GRBModel(env);
+    sub_m.set(GRB_IntAttr_ModelSense, GRB_MINIMIZE); // 最小化
+
+    int flightNumber = x.size();
+
+    vector<GRBVar> decisionTime(flightNumber);
+    vector<GRBVar> arrivalDelay(flightNumber);
+
+    double delay_cost = 0.0;
+
+    for (int i = 0; i < flightNumber; ++i)
     {
-        for (int u = 0; u <= d.gateNumber; ++u)
+        if (d.flightMap.at(i).flight_type == DEPARTURE)
         {
-            for (int v = 0; v <= d.gateNumber; ++v)
-            {
-                int idx = -1;
-                for (size_t k = 0; k < F_a_up.size(); ++k)
-                {
-                    if (F_a_up[k] == i)
-                    {
-                        idx = k;
-                        break;
-                    }
-                }
-                auto delta_i = d.delta.at(i);
-                if (u == v)
-                {
-                    sub_m.addConstr(x[i][u] + x[delta_i][v] - Y[i][delta_i][u] <= z[idx][u][u] + 1);
-                    // 约束3-12
-                }
-                else
-                {
-                    sub_m.addConstr(z[idx][u][v] <= x[i][u]);
-                    sub_m.addConstr(z[idx][u][v] <= x[delta_i][v]);
-                    sub_m.addConstr(x[i][u] + x[delta_i][v] <= z[idx][u][v] + 1);
-                    // 约束3-9  3-10  3-11
-                }
-            }
+            decisionTime[i] = sub_m.addVar(0.0, GRB_INFINITY, 1.0, GRB_CONTINUOUS);
+            arrivalDelay[i] = sub_m.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS);
+            sub_m.addConstr(decisionTime[i] >= d.flightMap.at(i).scheduled_time);
+            delay_cost -= d.flightMap.at(i).scheduled_time;
         }
+        else
+        {
+            decisionTime[i] = sub_m.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS);
+            arrivalDelay[i] = sub_m.addVar(0.0, GRB_INFINITY, 1.0, GRB_CONTINUOUS);
+            sub_m.addConstr(decisionTime[i] >= d.flightMap.at(i).scheduled_time);
+            sub_m.addConstr(arrivalDelay[i] >= decisionTime[i] - d.flightMap.at(i).scheduled_time);
+        }
+    }
+
+    for (auto &[i, delta_i, u, v] : Z)
+    {
+        sub_m.addConstr(decisionTime[delta_i] >= decisionTime[i] + d.bufferTime + d.towTime[u][v]);
+    }
+
+    for (auto &[i, j, k] : Y)
+    {
+        sub_m.addConstr(decisionTime[j] >= decisionTime[i] + d.bufferTime);
     }
 
     sub_m.optimize();
 
-    return sub_m.get(GRB_DoubleAttr_ObjVal);
-}
+    delay_cost += sub_m.get(GRB_DoubleAttr_ObjVal);
 
-auto solve_delaycost_subproblem(GRBEnv const &env, const vector<vector<GRBVar>> &x)
-{
-    // 计算期望延误成本 E(x)
-
-    auto sub_m = GRBModel(env);
-
-    sub_m.set(GRB_IntAttr_ModelSense, GRB_MINIMIZE); // 最小化
+    return delay_cost;
 }
 
 int main()
@@ -201,9 +233,7 @@ int main()
     } // 对于到达后不离开的航班，设置拖行到停机坪的成本
 
     auto eta = m.addVar(0.0, GRB_INFINITY, 1.0, GRB_CONTINUOUS, "eta");
-    // =E(x) ， 期望延误成本
-    auto tow_cost = m.addVar(0.0, GRB_INFINITY, 1.0, GRB_CONTINUOUS, "tow_cost");
-    // C_tow(x)   ， 机位拖行成本
+    // =延误成本 + 拖行成本
 
     m.set(GRB_IntAttr_ModelSense, GRB_MINIMIZE); // 最小化
 
@@ -224,6 +254,29 @@ int main()
             m.addConstr(x[i][k] == 0, "Flight-GateConstr_" + to_string(i) + "_" + to_string(k));
         }
     } // 大型飞机不能分配到中等大小登机口
+
+    // 写一个benders分解， 主问题算x， 子问题算 x的延误成本和拖行成本
+    double LB = 0.0, UB = 1e6, eps = 10.0;
+
+    while (UB - LB > eps)
+    {
+        m.optimize();
+        auto Y = determine_Y(x, d.flights);
+        sparseZ Z;
+        double tow_cost = calculateTowCost(env, d, x, Y, Z);
+        double delay_cost = calculateDelayCost(env, d, x, Y, Z);
+        double total_cost = tow_cost + delay_cost;
+
+        // cTx + eta - eta + total_cost
+        UB = std::min(UB, m.get(GRB_DoubleAttr_ObjVal) - eta.get(GRB_DoubleAttr_X) + total_cost);
+
+        // 添加割
+        /*  待补充 */
+
+        LB = std::max(LB, m.get(GRB_DoubleAttr_ObjVal));
+
+        std::cout << "Current LB: " << LB << ", UB: " << UB << std::endl;
+    }
 
     return 0;
 }
