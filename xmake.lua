@@ -1,6 +1,9 @@
 add_rules("mode.release")
 
 target("gate_assignment")
+
+    set_languages("c++20")
+
     set_kind("binary")
     add_files("src/*.cpp")
 

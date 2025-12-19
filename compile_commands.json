@@ -1,11 +1,11 @@
 [
 {
   "directory": "D:\\CCPJ\\gate_assignment",
-  "arguments": ["C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\cl.exe", "/c", "/nologo", "/O2", "/ID:\\GUROBI\\gurobi1203\\win64\\include", "/EHsc", "/DNDEBUG", "/Fobuild\\.objs\\gate_assignment\\windows\\x64\\release\\src\\main.cpp.obj", "src\\main.cpp"],
+  "arguments": ["C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\cl.exe", "/c", "/nologo", "/O2", "/std:c++20", "/ID:\\GUROBI\\gurobi1203\\win64\\include", "/EHsc", "/DNDEBUG", "/Fobuild\\.objs\\gate_assignment\\windows\\x64\\release\\src\\main.cpp.obj", "src\\main.cpp"],
   "file": "src\\main.cpp"
 },
 {
   "directory": "D:\\CCPJ\\gate_assignment",
-  "arguments": ["C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\cl.exe", "/c", "/nologo", "/O2", "/ID:\\GUROBI\\gurobi1203\\win64\\include", "/EHsc", "/DNDEBUG", "/Fobuild\\.objs\\gate_assignment\\windows\\x64\\release\\src\\mip1.cpp.obj", "src\\mip1.cpp"],
+  "arguments": ["C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\HostX64\\x64\\cl.exe", "/c", "/nologo", "/O2", "/std:c++20", "/ID:\\GUROBI\\gurobi1203\\win64\\include", "/EHsc", "/DNDEBUG", "/Fobuild\\.objs\\gate_assignment\\windows\\x64\\release\\src\\mip1.cpp.obj", "src\\mip1.cpp"],
   "file": "src\\mip1.cpp"
 }]
