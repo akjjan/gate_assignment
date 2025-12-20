@@ -54,7 +54,7 @@ map<int, vector<int>> get_flights_in_gate_map(const vector<vector<GRBVar>> &x) {
   return flights_in_gate;
 }
 
-using sparseSuccession = unordered_set<successionKey, successionKeyHash>;
+using sparseSuccession = unordered_set<yKey, yKeyHash>;
 // y_i_j_k，连续执行关系的类型别名，稀疏存储
 
 sparseSuccession determine_Y(const vector<vector<GRBVar>> &x,

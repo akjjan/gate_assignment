@@ -16,15 +16,15 @@ inline bool operator<(const Flight &a, const Flight &b) {
   return a.scheduled_time < b.scheduled_time;
 }
 
-struct successionKey {
+struct yKey {
   int i, j, k;
-  bool operator==(const successionKey &other) const {
+  bool operator==(const yKey &other) const {
     return i == other.i && j == other.j && k == other.k;
   }
 };
 
-struct successionKeyHash { // 此哈希函数适用于i,j,k均小于16384的情况
-  std::size_t operator()(const successionKey &key) const {
+struct yKeyHash { // 此哈希函数适用于i,j,k均小于16384的情况
+  std::size_t operator()(const yKey &key) const {
     return (std::size_t(key.i) << 28) | (std::size_t(key.j) << 14) |
            std::size_t(key.k);
   }
