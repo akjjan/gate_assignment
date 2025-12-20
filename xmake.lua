@@ -5,7 +5,7 @@ target("gate_assignment")
     set_languages("c++20")
 
     set_kind("binary")
-    add_files("src/*.cpp")
+    add_files("src/*.cpp|mip1.cpp")
 
     -- 头文件
     add_includedirs("D:/GUROBI/gurobi1203/win64/include")
