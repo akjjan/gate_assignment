@@ -1,6 +1,5 @@
 #pragma once
 #include <cstddef>
-#include <functional>
 
 enum FlightType { ARRIVAL, DEPARTURE }; // 枚举类型表示航班类型
 
@@ -24,10 +23,10 @@ struct successionKey {
   }
 };
 
-struct successionKeyHash {
+struct successionKeyHash { // 此哈希函数适用于i,j,k均小于16384的情况
   std::size_t operator()(const successionKey &key) const {
-    return std::hash<int>()(key.i) ^ std::hash<int>()(key.j) ^
-           std::hash<int>()(key.k);
+    return (std::size_t(key.i) << 28) | (std::size_t(key.j) << 14) |
+           std::size_t(key.k);
   }
 };
 
@@ -39,9 +38,9 @@ struct zKey {
   }
 };
 
-struct zKeyHash {
+struct zKeyHash { // 此哈希函数适用于i,delta_i,u,v均小于16384的情况
   std::size_t operator()(const zKey &key) const {
-    return std::hash<int>()(key.i) ^ std::hash<int>()(key.delta_i) ^
-           std::hash<int>()(key.u) ^ std::hash<int>()(key.v);
+    return (std::size_t(key.i) << 42) | (std::size_t(key.delta_i) << 28) |
+           (std::size_t(key.u) << 14) | std::size_t(key.v);
   }
 };
