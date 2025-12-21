@@ -16,12 +16,14 @@ using std::unordered_set;
 using std::vector;
 
 caseData makeSampleCaseData() {
-  int flightNumber = 500;      // 全局变量，航班数量
-  int gateNumber = 50;         // 全局变量，登机口数量
+  int flightNumber = 100;      // 航班数量
+  int gateNumber = 10;         // 登机口数量
   int apronIndex = gateNumber; // 明确停机坪索引
-  int bufferTime = 15;         // 缓冲时间
+  int bufferTime = 30;         // 缓冲时间
   vector<double> apronPenaltyCost(flightNumber,
                                   100.0); // 每个航班的停机坪惩罚成本
+  vector<double> delayPenaltyCost(flightNumber,
+                                  100.0); // 每个航班的延误惩罚成本
   vector<Flight> flights(flightNumber);   // 航班信息列表
   vector<int> noDepartArr;   // \underline{F_a}  不离开的到达航班索引
   vector<int> haveDepartArr; // \overline{F_a}   有离开的到达航班索引
@@ -35,8 +37,9 @@ caseData makeSampleCaseData() {
       gateNumber + 1, vector<double>(gateNumber + 1, 30.0)); // 拖行时间
 
   return makeCaseData(flightNumber, gateNumber, bufferTime, apronPenaltyCost,
-                      flights, noDepartArr, haveDepartArr, departFlights, delta,
-                      mediumGates, largeFlights, towCost, towTime);
+                      delayPenaltyCost, flights, noDepartArr, haveDepartArr,
+                      departFlights, delta, mediumGates, largeFlights, towCost,
+                      towTime);
 }
 
 map<int, vector<int>> get_flights_in_gate_map(const vector<vector<GRBVar>> &x) {

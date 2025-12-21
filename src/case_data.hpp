@@ -14,6 +14,7 @@ struct caseData {
   int bufferTime;   // 缓冲时间
 
   vector<double> apronPenaltyCost; // 每个航班的停机坪惩罚成本
+  vector<double> delayPenaltyCost; // 每个航班的延误惩罚成本
   vector<Flight> flights;          // 航班信息列表
 
   vector<int> noDepartArr;   //  \underline{F_a}  不离开的到达航班索引
@@ -34,6 +35,7 @@ struct caseData {
 inline caseData
 makeCaseData(int flightNumber, int gateNumber, int bufferTime,
              const vector<double> &apronPenaltyCost,
+             const vector<double> &delayPenaltyCost,
              const vector<Flight> &flights, const vector<int> &noDepartArr,
              const vector<int> &haveDepartArr, const vector<int> &departFlights,
              const map<int, int> &delta, const vector<int> &mediumGates,
@@ -47,6 +49,7 @@ makeCaseData(int flightNumber, int gateNumber, int bufferTime,
   data.apronIndex = gateNumber; // 停机坪索引等于登机口数量
   data.bufferTime = bufferTime;
   data.apronPenaltyCost = apronPenaltyCost;
+  data.delayPenaltyCost = delayPenaltyCost;
   data.flights = flights;
   data.noDepartArr = noDepartArr;
   data.haveDepartArr = haveDepartArr;
