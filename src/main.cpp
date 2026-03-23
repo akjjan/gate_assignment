@@ -180,6 +180,147 @@ double calculateDelayCost(const GRBEnv &env, const caseData &d,
   return delay_cost;
 }
 
+class Solver {
+public:
+  Solver(const caseData &data)
+      : d_(data), env_(createEnv("gate_assignment.log")), master_(env_) {}
+
+  void build_master_problem() {
+    auto flight_number = d_.flightNumber;
+    auto gate_number = d_.gateNumber;
+    const auto &no_depart_arr = d_.noDepartArr;
+
+    x_.resize(flight_number, vector<GRBVar>(gate_number + 1));
+    // 决策变量 x[i][j]，表示航班 i 是否分配到登机口 j , x[i][d.apronIndex]
+    // 表示航班 i 分配停机坪
+    for (int i = 0; i < flight_number; ++i) {
+      for (int k = 0; k <= gate_number; ++k) {
+        auto varName = "x_" + to_string(i) + "_" + to_string(k);
+        if (k < gate_number) { // 如果分配到登机口
+          if (std::find(no_depart_arr.begin(), no_depart_arr.end(), i) ==
+              no_depart_arr.end()) {
+            x_[i][k] = master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
+          } else // 如果是到达后不离开的，增加拖行到停机坪的成本
+            x_[i][k] = master_.addVar(0.0, 1.0, d_.towCost[k][d_.apronIndex],
+                                      GRB_BINARY, varName);
+        } else {
+          // 分配到停机坪的惩罚成本
+          x_[i][k] = master_.addVar(0.0, 1.0, d_.apronPenaltyCost[i],
+                                    GRB_BINARY, varName);
+        }
+        // 航班的停机坪分配成本
+      }
+    }
+    //---------------------------
+    // 决策变量  y[i][j][k]，表示航班 i 和 j 在登机口 k 连续执行
+    int virtual_start_flight = flight_number;   // 虚拟起始航班索引
+    int virtual_end_flight = flight_number + 1; // 虚拟结束航班索引
+    y_.resize(flight_number + 2,
+              vector<vector<GRBVar>>(flight_number + 2,
+                                     vector<GRBVar>(gate_number + 1)));
+    for (int i = 0; i <= flight_number + 1; ++i) {
+      for (int j = 0; j <= flight_number + 1; ++j) {
+        for (int k = 0; k <= gate_number; ++k) {
+          auto varName =
+              "y_" + to_string(i) + "_" + to_string(j) + "_" + to_string(k);
+          y_[i][j][k] = master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
+        }
+      }
+    }
+    //---------------------------- z_i_j_u_v
+    // 决策变量 z[i][j][u][v]，表示关联航班 i 和 j 从 登机口 u 拖行到 v
+    z_.resize(flight_number,
+              vector<vector<vector<GRBVar>>>(
+                  flight_number,
+                  vector<vector<GRBVar>>(gate_number + 1,
+                                         vector<GRBVar>(gate_number + 1))));
+    for (int i = 0; i < flight_number; ++i) {
+      auto delta_i = d_.delta.at(i); // 到港航班 i 对应的离开航班ID
+      for (int j = 0; j < flight_number; ++j) {
+        for (int u = 0; u <= gate_number; ++u) {
+          for (int v = 0; v <= gate_number; ++v) {
+            auto varName = "z_" + to_string(i) + "_" + to_string(j) + "_" +
+                           to_string(u) + "_" + to_string(v);
+            if (j == delta_i)
+              z_[i][j][u][v] = master_.addVar(0.0, 1.0, d_.towCost[u][v],
+                                              GRB_BINARY, varName);
+            else
+              z_[i][j][u][v] =
+                  master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
+          }
+        }
+      }
+    }
+
+    // 非线性部分
+    eta_ = master_.addVar(0.0, GRB_INFINITY, 1.0, GRB_CONTINUOUS, "eta");
+
+    // 主问题约束------------------------
+    // 每个航班分配一个登机口或停机坪
+    for (int i = 0; i < flight_number; ++i) {
+      GRBLinExpr expr = 0;
+      for (int j = 0; j <= gate_number; ++j) {
+        expr += x_[i][j];
+      }
+      master_.addConstr(expr == 1, "AssignConstr_" + to_string(i));
+    }
+
+    // 大型飞机不能分配到中等大小登机口
+    for (int i : d_.largeFlights) {
+      for (int k : d_.mediumGates) {
+        master_.addConstr(x_[i][k] == 0, "Flight-GateConstr_" + to_string(i) +
+                                             "_" + to_string(k));
+      }
+    }
+
+    // 每个航班都有后续航班或者到虚拟结束航班
+    for (int i = 0; i < flight_number; ++i) {
+      for (int k = 0; k < gate_number; ++k) {
+        GRBLinExpr right_hand_side = 0;
+        for (int j = 0; j < flight_number; ++j) {
+          if (j != i) {
+            right_hand_side += y_[i][j][k];
+          }
+          right_hand_side += y_[i][virtual_end_flight]
+                               [k]; // i 后面没有航班了，直接到虚拟结束航班
+        }
+        master_.addConstr(x_[i][k] == right_hand_side, "GateSuccessionConstr_" +
+                                                           to_string(i) + "_" +
+                                                           to_string(k));
+      }
+    }
+
+    // 虚拟起始航班有一个后续
+    for (int k = 0; k < gate_number; ++k) {
+      GRBLinExpr left_hand_side = 0;
+      for (int j = 0; j < flight_number; ++j) {
+        left_hand_side += y_[virtual_start_flight][j][k];
+      }
+      left_hand_side += y_[virtual_start_flight][virtual_end_flight][k];
+      master_.addConstr(left_hand_side == 1,
+                        "VirtualStartConstr_" + to_string(k));
+    }
+
+    // 虚拟终止航班有一个前驱
+  }
+
+private:
+  static GRBEnv createEnv(const std::string &logFile) {
+    GRBEnv env(true);
+    env.set("LogFile", logFile);
+    env.start();
+    return env;
+  }
+
+  caseData d_;
+  GRBEnv env_;
+  GRBModel master_;
+  GRBVar eta_;
+  vector<vector<GRBVar>> x_;
+  vector<vector<vector<GRBVar>>> y_;
+  vector<vector<vector<vector<GRBVar>>>> z_;
+};
+
 int main() {
   auto env = GRBEnv(true);
   env.set("LogFile", "gate_assignment.log");
