@@ -1,5 +1,7 @@
 #pragma once
+#include "gurobi_c++.h"
 #include <cstddef>
+#include <utility>
 
 enum FlightType { ARRIVAL, DEPARTURE }; // 枚举类型表示航班类型
 
@@ -43,4 +45,15 @@ struct zKeyHash { // 此哈希函数适用于i,delta_i,u,v均小于16384的情�
     return (std::size_t(key.i) << 42) | (std::size_t(key.delta_i) << 28) |
            (std::size_t(key.u) << 14) | std::size_t(key.v);
   }
+};
+
+struct Row {
+  GRBConstr constr;
+  double constant = 0.0;
+  double x_coeff = 0.0;
+  double y_coeff = 0.0;
+  double z_coeff = 0.0;
+  std::pair<int, int> x_var = {-1, -1}; // x[i][k] 的索引
+  yKey y_var = {-1, -1, -1};            // y[i][j][k] 的索引
+  zKey z_var = {-1, -1, -1, -1};        // z[i][delta_i][u][v] 的索引
 };

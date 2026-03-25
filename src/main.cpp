@@ -7,6 +7,7 @@
 #include <iostream>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -215,25 +216,19 @@ public:
     // 决策变量  y[i][j][k]，表示航班 i 和 j 在登机口 k 连续执行
     int virtual_start_flight = flight_number;   // 虚拟起始航班索引
     int virtual_end_flight = flight_number + 1; // 虚拟结束航班索引
-    y_.resize(flight_number + 2,
-              vector<vector<GRBVar>>(flight_number + 2,
-                                     vector<GRBVar>(gate_number + 1)));
+
     for (int i = 0; i <= flight_number + 1; ++i) {
       for (int j = 0; j <= flight_number + 1; ++j) {
         for (int k = 0; k <= gate_number; ++k) {
           auto varName =
               "y_" + to_string(i) + "_" + to_string(j) + "_" + to_string(k);
-          y_[i][j][k] = master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
+          y_[{i, j, k}] = master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
         }
       }
     }
     //---------------------------- z_i_j_u_v
     // 决策变量 z[i][j][u][v]，表示关联航班 i 和 j 从 登机口 u 拖行到 v
-    z_.resize(flight_number,
-              vector<vector<vector<GRBVar>>>(
-                  flight_number,
-                  vector<vector<GRBVar>>(gate_number + 1,
-                                         vector<GRBVar>(gate_number + 1))));
+
     for (int i = 0; i < flight_number; ++i) {
       auto delta_i = d_.delta.at(i); // 到港航班 i 对应的离开航班ID
       for (int j = 0; j < flight_number; ++j) {
@@ -242,10 +237,10 @@ public:
             auto varName = "z_" + to_string(i) + "_" + to_string(j) + "_" +
                            to_string(u) + "_" + to_string(v);
             if (j == delta_i)
-              z_[i][j][u][v] = master_.addVar(0.0, 1.0, d_.towCost[u][v],
-                                              GRB_BINARY, varName);
+              z_[{i, j, u, v}] = master_.addVar(0.0, 1.0, d_.towCost[u][v],
+                                                GRB_BINARY, varName);
             else
-              z_[i][j][u][v] =
+              z_[{i, j, u, v}] =
                   master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
           }
         }
@@ -279,10 +274,10 @@ public:
         GRBLinExpr right_hand_side = 0;
         for (int j = 0; j < flight_number; ++j) {
           if (j != i) {
-            right_hand_side += y_[i][j][k];
+            right_hand_side += y_[{i, j, k}];
           }
-          right_hand_side += y_[i][virtual_end_flight]
-                               [k]; // i 后面没有航班了，直接到虚拟结束航班
+          right_hand_side += y_[{i, virtual_end_flight,
+                                 k}]; // i 后面没有航班了，直接到虚拟结束航班
         }
         master_.addConstr(x_[i][k] == right_hand_side, "GateSuccessionConstr_" +
                                                            to_string(i) + "_" +
@@ -294,14 +289,356 @@ public:
     for (int k = 0; k < gate_number; ++k) {
       GRBLinExpr left_hand_side = 0;
       for (int j = 0; j < flight_number; ++j) {
-        left_hand_side += y_[virtual_start_flight][j][k];
+        left_hand_side += y_[{virtual_start_flight, j, k}];
       }
-      left_hand_side += y_[virtual_start_flight][virtual_end_flight][k];
+      left_hand_side += y_[{virtual_start_flight, virtual_end_flight, k}];
       master_.addConstr(left_hand_side == 1,
                         "VirtualStartConstr_" + to_string(k));
     }
 
     // 虚拟终止航班有一个前驱
+    for (int k = 0; k < gate_number; ++k) {
+      GRBLinExpr left_hand_side = 0;
+      for (int j = 0; j < flight_number; ++j) {
+        left_hand_side += y_[{j, virtual_end_flight, k}];
+      }
+      left_hand_side += y_[{virtual_start_flight, virtual_end_flight, k}];
+      master_.addConstr(left_hand_side == 1,
+                        "VirtualEndConstr_" + to_string(k));
+    }
+
+    // 航班分配约束
+    for (int i = 0; i < flight_number; ++i) {
+      for (int k = 0; k < gate_number; ++k) {
+        GRBLinExpr left_hand_side = 0;
+        GRBLinExpr right_hand_side = 0;
+        for (int j = 0; j < flight_number; ++j) {
+          if (j != i) {
+            left_hand_side += y_[{j, i, k}];
+            right_hand_side += y_[{i, j, k}];
+          }
+        }
+        left_hand_side += y_[{virtual_start_flight, i, k}];
+        right_hand_side += y_[{i, virtual_end_flight, k}];
+
+        master_.addConstr(left_hand_side == right_hand_side,
+                          "FlowConstr_" + to_string(i) + "_" + to_string(k));
+      }
+    }
+
+    // 拖行约束
+    for (int i : d_.haveDepartArr) {
+      int delta_i = d_.delta.at(i);
+      for (int u = 0; u < gate_number; ++u) {
+        for (int v = 0; v < gate_number; ++v) {
+          if (v != u) {
+            master_.addConstr(
+                z_[{i, delta_i, u, v}] >= x_[i][u] + x_[delta_i][v] - 1,
+                "TowConstr1_" + to_string(i) + "_" + to_string(delta_i) + "_" +
+                    to_string(u) + "_" + to_string(v));
+            master_.addConstr(z_[{i, delta_i, u, v}] <= x_[i][u],
+                              "TowConstr2_" + to_string(i) + "_" +
+                                  to_string(delta_i));
+            master_.addConstr(z_[{i, delta_i, u, v}] <= x_[delta_i][v],
+                              "TowConstr3_" + to_string(i) + "_" +
+                                  to_string(delta_i) + "_" + to_string(v));
+          }
+        }
+
+        int k = u; // 同一登机口的情况
+        master_.addConstr(x_[i][k] + x_[delta_i][k] - y_[{i, delta_i, k}] <=
+                              z_[{i, delta_i, k, k}] + 1,
+                          "TowConstrSameGate_" + to_string(i) + "_" +
+                              to_string(delta_i) + "_" + to_string(k));
+      }
+    }
+
+    // 影子约束
+    for (int i : d_.largeFlights) {
+      for (int j : d_.largeFlights) {
+        if (j != i) {
+          for (int k = 0; k < gate_number; ++k) {
+            if (std::find(d_.mediumGates.begin(), d_.mediumGates.end(), k) !=
+                d_.mediumGates.end())
+              continue;
+            master_.addConstr(x_[i][k] + x_[j][(k + 1) % gate_number] <= 1,
+                              "ShadowConstr_" + to_string(i) + "_" +
+                                  to_string(j) + "_" + to_string(k));
+          }
+        }
+      }
+    }
+  }
+
+  std::pair<GRBModel, vector<Row>> build_single_senario_subproblem(
+      const caseData &standard, caseData &data,
+      const std::unordered_map<int, int> &departure_pert) {
+
+    GRBModel sub(env_);
+
+    int flight_number = standard.flightNumber;
+
+    std::unordered_map<int, GRBVar> departure_time;
+    std::unordered_map<int, GRBVar> arrival_time;
+    std::unordered_map<int, GRBVar> arrival_delay;
+
+    for (int i : d_.departFlights) {
+      departure_time[i] =
+          sub.addVar(0.0, GRB_INFINITY, d_.delayPenaltyCost[i], GRB_CONTINUOUS);
+    }
+
+    for (int i : d_.noDepartArr) {
+      arrival_time[i] = sub.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS);
+      arrival_delay[i] =
+          sub.addVar(0.0, GRB_INFINITY, d_.delayPenaltyCost[i], GRB_CONTINUOUS);
+    }
+    for (int i : d_.haveDepartArr) {
+      arrival_time[i] = sub.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS);
+      arrival_delay[i] =
+          sub.addVar(0.0, GRB_INFINITY, d_.delayPenaltyCost[i], GRB_CONTINUOUS);
+    }
+
+    vector<Row> rows; // 记录每个约束的常数项、系数和变量索引
+
+    // 约束3-18
+    for (int i : d_.haveDepartArr) {
+      int delta_i = d_.delta.at(i);
+      for (int u = 0; u <= d_.gateNumber; ++u) {
+        for (int v = 0; v <= d_.gateNumber; ++v) {
+          GRBLinExpr left_hand_side = departure_time[delta_i] - arrival_time[i];
+          GRBLinExpr right_hand_side =
+              departure_pert.at(delta_i) +
+              d_.towTime[u][v] * z_[{i, delta_i, u, v}];
+          Row row;
+          row.constr = sub.addConstr(left_hand_side >= right_hand_side,
+                                     "SubTowConstr_" + to_string(i) + "_" +
+                                         to_string(delta_i) + "_" +
+                                         to_string(u) + "_" + to_string(v));
+
+          row.constant = static_cast<double>(departure_pert.at(delta_i));
+          row.x_coeff = 0.0;
+          row.y_coeff = 0.0;
+          row.z_coeff = d_.towTime[u][v];
+          row.x_var = {0, 0};
+          row.y_var = {0, 0, 0};
+          row.z_var = {i, delta_i, u, v};
+          rows.push_back(row);
+        }
+      }
+    }
+
+    // 3-19
+    for (int i : d_.noDepartArr) {
+      int delta_i = d_.delta.at(i);
+      for (int j : d_.departFlights) {
+        if (j == delta_i)
+          continue;
+        for (int k = 0; k < d_.gateNumber; ++k) {
+          GRBLinExpr left_hand_side = departure_time[j] - arrival_time[i];
+          GRBLinExpr right_hand_side = BIG_M * (y_[{i, j, k}] - 1) +
+                                       d_.bufferTime + departure_pert.at(j);
+          Row row;
+          row.constr =
+              sub.addConstr(left_hand_side >= right_hand_side,
+                            "SubSuccessionConstr_" + to_string(i) + "_" +
+                                to_string(j) + "_" + to_string(k));
+          row.constant = d_.bufferTime +
+                         static_cast<double>(departure_pert.at(j)) -
+                         static_cast<double>(BIG_M);
+          row.x_coeff = 0.0;
+          row.y_coeff = static_cast<double>(BIG_M);
+          row.z_coeff = 0.0;
+          row.x_var = {0, 0};
+          row.y_var = {i, j, k};
+          row.z_var = {0, 0, 0, 0};
+          rows.push_back(row);
+        }
+      }
+    }
+
+    // 3-19
+    for (int i : d_.haveDepartArr) {
+      int delta_i = d_.delta.at(i);
+      for (int j : d_.departFlights) {
+        if (j == delta_i)
+          continue;
+        for (int k = 0; k < d_.gateNumber; ++k) {
+          GRBLinExpr left_hand_side = departure_time[j] - arrival_time[i];
+          GRBLinExpr right_hand_side = BIG_M * (y_[{i, j, k}] - 1) +
+                                       d_.bufferTime + departure_pert.at(j);
+          Row row;
+          row.constr =
+              sub.addConstr(left_hand_side >= right_hand_side,
+                            "SubSuccessionConstr_" + to_string(i) + "_" +
+                                to_string(j) + "_" + to_string(k));
+          row.constant = d_.bufferTime +
+                         static_cast<double>(departure_pert.at(j)) -
+                         static_cast<double>(BIG_M);
+          row.x_coeff = 0.0;
+          row.y_coeff = static_cast<double>(BIG_M);
+          row.z_coeff = 0.0;
+          row.x_var = {0, 0};
+          row.y_var = {i, j, k};
+          row.z_var = {0, 0, 0, 0};
+          rows.push_back(row);
+        }
+      }
+    }
+
+    // 3-20
+    vector<int> arrival_flights;
+    arrival_flights.insert(arrival_flights.end(), d_.noDepartArr.begin(),
+                           d_.noDepartArr.end());
+    arrival_flights.insert(arrival_flights.end(), d_.haveDepartArr.begin(),
+                           d_.haveDepartArr.end());
+
+    for (int i : arrival_flights) {
+      for (int j : arrival_flights) {
+        if (j == i)
+          continue;
+        for (int k = 0; k < d_.gateNumber; ++k) {
+          GRBLinExpr left_hand_side = arrival_time[j] - arrival_time[i];
+          GRBLinExpr right_hand_side =
+              BIG_M * (y_[{i, j, k}] - 1) + d_.bufferTime;
+
+          Row row;
+          row.constr =
+              sub.addConstr(left_hand_side >= right_hand_side,
+                            "SubArrivalSuccessionConstr_" + to_string(i) + "_" +
+                                to_string(j) + "_" + to_string(k));
+
+          row.constant = d_.bufferTime - static_cast<double>(BIG_M);
+          row.x_coeff = 0.0;
+          row.y_coeff = static_cast<double>(BIG_M);
+          row.z_coeff = 0.0;
+          row.x_var = {0, 0};
+          row.y_var = {i, j, k};
+          row.z_var = {0, 0, 0, 0};
+          rows.push_back(row);
+        }
+      }
+    }
+
+    // 3-21
+    for (int i : d_.departFlights) {
+      for (int j : arrival_flights) {
+        for (int k = 0; k < d_.gateNumber; ++k) {
+          GRBLinExpr left_hand_side = arrival_time[j] - departure_time[i];
+          GRBLinExpr right_hand_side =
+              BIG_M * (y_[{i, j, k}] - 1) + d_.bufferTime;
+
+          Row row;
+          row.constr =
+              sub.addConstr(left_hand_side >= right_hand_side,
+                            "SubDepartArrivalSuccessionConstr_" + to_string(i) +
+                                "_" + to_string(j) + "_" + to_string(k));
+
+          row.constant = d_.bufferTime - static_cast<double>(BIG_M);
+          row.x_coeff = 0.0;
+          row.y_coeff = static_cast<double>(BIG_M);
+          row.z_coeff = 0.0;
+          row.x_var = {0, 0};
+          row.y_var = {i, j, k};
+          row.z_var = {0, 0, 0, 0};
+
+          rows.push_back(row);
+        }
+      }
+    }
+
+    // 3-22
+    for (int i : d_.departFlights) {
+      for (int j : d_.departFlights) {
+        if (j == i)
+          continue;
+        for (int k = 0; k < d_.gateNumber; ++k) {
+          GRBLinExpr left_hand_side = departure_time[j] - departure_time[i];
+          GRBLinExpr right_hand_side = BIG_M * (y_[{i, j, k}] - 1) +
+                                       d_.bufferTime + departure_pert.at(j);
+
+          Row row;
+          row.constr =
+              sub.addConstr(left_hand_side >= right_hand_side,
+                            "SubDepartSuccessionConstr_" + to_string(i) + "_" +
+                                to_string(j) + "_" + to_string(k));
+
+          row.constant = d_.bufferTime - static_cast<double>(BIG_M) +
+                         static_cast<double>(departure_pert.at(j));
+          row.x_coeff = 0.0;
+          row.y_coeff = static_cast<double>(BIG_M);
+          row.z_coeff = 0.0;
+          row.x_var = {0, 0};
+          row.y_var = {i, j, k};
+          row.z_var = {0, 0, 0, 0};
+          rows.push_back(row);
+        }
+      }
+    }
+
+    // 3-23
+    for (int j : d_.departFlights) {
+      Row row;
+      row.constr =
+          sub.addConstr(departure_time[j] >= d_.flightMap.at(j).scheduled_time,
+                        "SubScheduledTimeConstr_" + to_string(j));
+      row.constant = static_cast<double>(d_.flightMap.at(j).scheduled_time);
+      row.x_coeff = 0.0;
+      row.y_coeff = 0.0;
+      row.z_coeff = 0.0;
+      row.x_var = {0, 0};
+      row.y_var = {0, 0, 0};
+      row.z_var = {0, 0, 0, 0};
+      rows.push_back(row);
+    }
+
+    // 3-24
+    for (int j : arrival_flights) {
+      Row row;
+      row.constr =
+          sub.addConstr(arrival_time[j] >= d_.flightMap.at(j).scheduled_time,
+                        "SubArrivalScheduledTimeConstr_" + to_string(j));
+      row.constant = static_cast<double>(d_.flightMap.at(j).scheduled_time);
+      row.x_coeff = 0.0;
+      row.y_coeff = 0.0;
+      row.z_coeff = 0.0;
+      row.x_var = {0, 0};
+      row.y_var = {0, 0, 0};
+      row.z_var = {0, 0, 0, 0};
+      rows.push_back(row);
+    }
+
+    // 3-25
+    for (int j : arrival_flights) {
+      Row row;
+      row.constr =
+          sub.addConstr(arrival_delay[j] >=
+                            arrival_time[j] - d_.flightMap.at(j).scheduled_time,
+                        "SubArrivalDelayConstr_" + to_string(j));
+
+      row.constant = -static_cast<double>(d_.flightMap.at(j).scheduled_time);
+      row.x_coeff = 0.0;
+      row.y_coeff = 1.0;
+      row.z_coeff = 0.0;
+      row.x_var = {0, 0};
+      row.y_var = {0, 0, 0};
+      row.z_var = {0, 0, 0, 0};
+      rows.push_back(row);
+    }
+
+    GRBLinExpr objective = 0.0;
+
+    for (int i : d_.departFlights) {
+      objective += d_.delayPenaltyCost[i] *
+                   (departure_time[i] - d_.flightMap.at(i).scheduled_time);
+    }
+
+    for (int i : arrival_flights) {
+      objective += d_.delayPenaltyCost[i] * arrival_delay[i];
+    }
+
+    sub.setObjective(objective);
+
+    return {sub, rows};
   }
 
 private:
@@ -313,12 +650,13 @@ private:
   }
 
   caseData d_;
+  int BIG_M = 1450;
   GRBEnv env_;
   GRBModel master_;
   GRBVar eta_;
   vector<vector<GRBVar>> x_;
-  vector<vector<vector<GRBVar>>> y_;
-  vector<vector<vector<vector<GRBVar>>>> z_;
+  std::unordered_map<yKey, GRBVar, yKeyHash> y_;
+  std::unordered_map<zKey, GRBVar, zKeyHash> z_;
 };
 
 int main() {
