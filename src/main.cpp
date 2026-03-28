@@ -1,6 +1,7 @@
 #include "gurobi_c++.h"
 
 #include "case_data.hpp"
+#include "gurobi_c.h"
 #include "modelDef.hpp"
 
 #include <algorithm>
@@ -37,10 +38,12 @@ caseData makeSampleCaseData() {
   vector<vector<double>> towTime(
       gateNumber + 1, vector<double>(gateNumber + 1, 30.0)); // 拖行时间
 
+  std::unordered_map<int, int> departure_pert;
+
   return makeCaseData(flightNumber, gateNumber, bufferTime, apronPenaltyCost,
                       delayPenaltyCost, flights, noDepartArr, haveDepartArr,
                       departFlights, delta, mediumGates, largeFlights, towCost,
-                      towTime);
+                      towTime, departure_pert);
 }
 
 map<int, vector<int>> get_flights_in_gate_map(const vector<vector<GRBVar>> &x) {
@@ -370,13 +373,13 @@ public:
     }
   }
 
-  std::pair<GRBModel, vector<Row>> build_single_senario_subproblem(
-      const caseData &standard, caseData &data,
-      const std::unordered_map<int, int> &departure_pert) {
+  std::pair<GRBModel, vector<Row>>
+  build_single_senario_subproblem(caseData &data) {
 
     GRBModel sub(env_);
 
-    int flight_number = standard.flightNumber;
+    int flight_number = d_.flightNumber;
+    auto departure_pert = data.departure_pert;
 
     std::unordered_map<int, GRBVar> departure_time;
     std::unordered_map<int, GRBVar> arrival_time;
@@ -595,7 +598,7 @@ public:
     for (int j : arrival_flights) {
       Row row;
       row.constr =
-          sub.addConstr(arrival_time[j] >= d_.flightMap.at(j).scheduled_time,
+          sub.addConstr(arrival_time[j] >= data.flightMap.at(j).scheduled_time,
                         "SubArrivalScheduledTimeConstr_" + to_string(j));
       row.constant = static_cast<double>(d_.flightMap.at(j).scheduled_time);
       row.x_coeff = 0.0;
@@ -610,14 +613,14 @@ public:
     // 3-25
     for (int j : arrival_flights) {
       Row row;
-      row.constr =
-          sub.addConstr(arrival_delay[j] >=
-                            arrival_time[j] - d_.flightMap.at(j).scheduled_time,
-                        "SubArrivalDelayConstr_" + to_string(j));
+      row.constr = sub.addConstr(arrival_delay[j] >=
+                                     arrival_time[j] -
+                                         data.flightMap.at(j).scheduled_time,
+                                 "SubArrivalDelayConstr_" + to_string(j));
 
       row.constant = -static_cast<double>(d_.flightMap.at(j).scheduled_time);
       row.x_coeff = 0.0;
-      row.y_coeff = 1.0;
+      row.y_coeff = 0.0;
       row.z_coeff = 0.0;
       row.x_var = {0, 0};
       row.y_var = {0, 0, 0};
@@ -641,7 +644,104 @@ public:
     return {sub, rows};
   }
 
+  std::pair<int, GRBLinExpr> get_cut(GRBModel &sub, const vector<Row> &rows,
+                                     const double weight) {
+    sub.optimize(); // 求解子问题
+
+    int status = sub.get(GRB_IntAttr_Status);
+
+    if (status == GRB_INFEASIBLE) {
+      return {status, get_feasibility_cut(rows)};
+    } else if (status == GRB_OPTIMAL) {
+      return {status, get_optimality_cut(rows, weight)};
+    } else {
+      std::cerr << "Subproblem optimization ended with status " << status
+                << std::endl;
+      return {status, GRBLinExpr(0.0)};
+    }
+  }
+
+  GRBLinExpr get_feasibility_cut(const vector<Row> &rows) {
+    GRBLinExpr lhs = 0.0;
+    for (const auto &row : rows) {
+      GRBLinExpr expr = 0.0;
+      double lambda_i = row.constr.get(GRB_DoubleAttr_FarkasDual);
+      expr += row.constant;
+      if (row.x_coeff != 0.0) {
+        expr += row.x_coeff * x_[row.x_var.first][row.x_var.second];
+      }
+      if (row.y_coeff != 0.0) {
+        expr += row.y_coeff * y_[row.y_var];
+      }
+      if (row.z_coeff != 0.0) {
+        expr += row.z_coeff * z_[row.z_var];
+      }
+      expr *= lambda_i;
+      lhs += expr;
+    }
+    return lhs;
+  }
+
+  GRBLinExpr get_optimality_cut(const vector<Row> &rows, const double weight) {
+    GRBLinExpr rhs = 0.0;
+    for (const auto &row : rows) {
+      GRBLinExpr expr = 0.0;
+      double pi_i = row.constr.get(GRB_DoubleAttr_Pi);
+      expr += row.constant;
+      if (row.x_coeff != 0.0) {
+        expr += row.x_coeff * x_[row.x_var.first][row.x_var.second];
+      }
+      if (row.y_coeff != 0.0) {
+        expr += row.y_coeff * y_[row.y_var];
+      }
+      if (row.z_coeff != 0.0) {
+        expr += row.z_coeff * z_[row.z_var];
+      }
+      expr *= pi_i;
+      rhs += expr;
+    }
+    rhs *= weight;
+    return rhs;
+  }
+
+  void solve_with_callback(vector<caseData> &senarios) {
+    master_.set(GRB_IntParam_LazyConstraints, 1);
+    BendersCallback cb(this, senarios);
+    master_.setCallback(&cb);
+    master_.optimize();
+    master_.setCallback(nullptr); // 取消回调，准备添加割
+  }
+
 private:
+  class BendersCallback : public GRBCallback {
+  private:
+    Solver *solver_;
+    vector<caseData> senarios_;
+
+  protected:
+    void callback() override {
+      if (where == GRB_CB_MIPSOL) {
+        int senario_num = senarios_.size();
+        double weight = 1.0 / static_cast<double>(senario_num); // 平均分配权重
+        GRBLinExpr RHS = 0.0;
+        for (caseData &senario : senarios_) {
+          auto [sub, rows] = solver_->build_single_senario_subproblem(senario);
+          auto [status, cut] = solver_->get_cut(sub, rows, weight);
+          if (status == GRB_INFEASIBLE) {
+            addLazy(cut <= 0);
+          } else if (status == GRB_OPTIMAL) {
+            RHS += cut;
+          }
+        }
+        addLazy(solver_->eta_ >= RHS);
+      }
+    }
+
+  public:
+    BendersCallback(Solver *solver, const vector<caseData> &senarios)
+        : solver_(solver), senarios_(senarios) {}
+  };
+
   static GRBEnv createEnv(const std::string &logFile) {
     GRBEnv env(true);
     env.set("LogFile", logFile);
