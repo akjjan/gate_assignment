@@ -65,6 +65,7 @@ inline caseData makeCaseData(
   std::vector<int> arrivalFlights = noDepartArr;
   arrivalFlights.insert(arrivalFlights.end(), haveDepartArr.begin(),
                         haveDepartArr.end());
+  data.arrivalFlights = arrivalFlights;
 
   for (const Flight &flight : flights) {
     data.flightMap[flight.flight_id] = flight;

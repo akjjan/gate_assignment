@@ -14,6 +14,7 @@
 
 using std::map;
 using std::to_string;
+using std::unordered_map;
 using std::unordered_set;
 using std::vector;
 
@@ -38,7 +39,7 @@ caseData makeSampleCaseData() {
   vector<vector<double>> towTime(
       gateNumber + 1, vector<double>(gateNumber + 1, 30.0)); // 拖行时间
 
-  std::unordered_map<int, int> departure_pert;
+  unordered_map<int, int> departure_pert;
 
   return makeCaseData(flightNumber, gateNumber, bufferTime, apronPenaltyCost,
                       delayPenaltyCost, flights, noDepartArr, haveDepartArr,
@@ -186,12 +187,12 @@ double calculateDelayCost(const GRBEnv &env, const caseData &d,
 
 class Solver {
 public:
-  Solver(const caseData &data)
-      : d_(data), env_(createEnv("gate_assignment.log")), master_(env_) {}
+  Solver(const caseData &standard)
+      : d_(standard), env_(createEnv("gate_assignment.log")), master_(env_) {}
 
   void build_master_problem() {
-    auto flight_number = d_.flightNumber;
-    auto gate_number = d_.gateNumber;
+    int flight_number = d_.flightNumber;
+    int gate_number = d_.gateNumber;
     const auto &no_depart_arr = d_.noDepartArr;
 
     x_.resize(flight_number, vector<GRBVar>(gate_number + 1));
@@ -232,20 +233,16 @@ public:
     //---------------------------- z_i_j_u_v
     // 决策变量 z[i][j][u][v]，表示关联航班 i 和 j 从 登机口 u 拖行到 v
 
-    for (int i = 0; i < flight_number; ++i) {
-      auto delta_i = d_.delta.at(i); // 到港航班 i 对应的离开航班ID
-      for (int j = 0; j < flight_number; ++j) {
-        for (int u = 0; u <= gate_number; ++u) {
-          for (int v = 0; v <= gate_number; ++v) {
-            auto varName = "z_" + to_string(i) + "_" + to_string(j) + "_" +
-                           to_string(u) + "_" + to_string(v);
-            if (j == delta_i)
-              z_[{i, j, u, v}] = master_.addVar(0.0, 1.0, d_.towCost[u][v],
-                                                GRB_BINARY, varName);
-            else
-              z_[{i, j, u, v}] =
-                  master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
-          }
+    for (int i : d_.haveDepartArr) {
+      int j = d_.delta.at(i); // 到港航班 i 对应的离开航班ID
+
+      for (int u = 0; u <= gate_number; ++u) {
+        for (int v = 0; v <= gate_number; ++v) {
+          auto varName = "z_" + to_string(i) + "_" + to_string(j) + "_" +
+                         to_string(u) + "_" + to_string(v);
+
+          z_[{i, j, u, v}] =
+              master_.addVar(0.0, 1.0, d_.towCost[u][v], GRB_BINARY, varName);
         }
       }
     }
@@ -279,9 +276,9 @@ public:
           if (j != i) {
             right_hand_side += y_[{i, j, k}];
           }
-          right_hand_side += y_[{i, virtual_end_flight,
-                                 k}]; // i 后面没有航班了，直接到虚拟结束航班
         }
+        right_hand_side += y_[{i, virtual_end_flight,
+                               k}]; // i 后面没有航班了，直接到虚拟结束航班
         master_.addConstr(x_[i][k] == right_hand_side, "GateSuccessionConstr_" +
                                                            to_string(i) + "_" +
                                                            to_string(k));
@@ -374,16 +371,18 @@ public:
   }
 
   std::pair<GRBModel, vector<Row>>
-  build_single_senario_subproblem(caseData &data) {
+  build_single_senario_subproblem(caseData &data,
+                                  unordered_map<yKey, double> &y_val,
+                                  unordered_map<zKey, double> &z_val) {
 
     GRBModel sub(env_);
 
     int flight_number = d_.flightNumber;
     auto departure_pert = data.departure_pert;
 
-    std::unordered_map<int, GRBVar> departure_time;
-    std::unordered_map<int, GRBVar> arrival_time;
-    std::unordered_map<int, GRBVar> arrival_delay;
+    unordered_map<int, GRBVar> departure_time;
+    unordered_map<int, GRBVar> arrival_time;
+    unordered_map<int, GRBVar> arrival_delay;
 
     for (int i : d_.departFlights) {
       departure_time[i] =
@@ -411,7 +410,7 @@ public:
           GRBLinExpr left_hand_side = departure_time[delta_i] - arrival_time[i];
           GRBLinExpr right_hand_side =
               departure_pert.at(delta_i) +
-              d_.towTime[u][v] * z_[{i, delta_i, u, v}];
+              d_.towTime[u][v] * z_val[{i, delta_i, u, v}];
           Row row;
           row.constr = sub.addConstr(left_hand_side >= right_hand_side,
                                      "SubTowConstr_" + to_string(i) + "_" +
@@ -419,11 +418,9 @@ public:
                                          to_string(u) + "_" + to_string(v));
 
           row.constant = static_cast<double>(departure_pert.at(delta_i));
-          row.x_coeff = 0.0;
-          row.y_coeff = 0.0;
+
           row.z_coeff = d_.towTime[u][v];
-          row.x_var = {0, 0};
-          row.y_var = {0, 0, 0};
+
           row.z_var = {i, delta_i, u, v};
           rows.push_back(row);
         }
@@ -438,7 +435,7 @@ public:
           continue;
         for (int k = 0; k < d_.gateNumber; ++k) {
           GRBLinExpr left_hand_side = departure_time[j] - arrival_time[i];
-          GRBLinExpr right_hand_side = BIG_M * (y_[{i, j, k}] - 1) +
+          GRBLinExpr right_hand_side = BIG_M * (y_val[{i, j, k}] - 1) +
                                        d_.bufferTime + departure_pert.at(j);
           Row row;
           row.constr =
@@ -448,12 +445,11 @@ public:
           row.constant = d_.bufferTime +
                          static_cast<double>(departure_pert.at(j)) -
                          static_cast<double>(BIG_M);
-          row.x_coeff = 0.0;
+
           row.y_coeff = static_cast<double>(BIG_M);
-          row.z_coeff = 0.0;
-          row.x_var = {0, 0};
+
           row.y_var = {i, j, k};
-          row.z_var = {0, 0, 0, 0};
+
           rows.push_back(row);
         }
       }
@@ -467,7 +463,7 @@ public:
           continue;
         for (int k = 0; k < d_.gateNumber; ++k) {
           GRBLinExpr left_hand_side = departure_time[j] - arrival_time[i];
-          GRBLinExpr right_hand_side = BIG_M * (y_[{i, j, k}] - 1) +
+          GRBLinExpr right_hand_side = BIG_M * (y_val[{i, j, k}] - 1) +
                                        d_.bufferTime + departure_pert.at(j);
           Row row;
           row.constr =
@@ -477,12 +473,11 @@ public:
           row.constant = d_.bufferTime +
                          static_cast<double>(departure_pert.at(j)) -
                          static_cast<double>(BIG_M);
-          row.x_coeff = 0.0;
+
           row.y_coeff = static_cast<double>(BIG_M);
-          row.z_coeff = 0.0;
-          row.x_var = {0, 0};
+
           row.y_var = {i, j, k};
-          row.z_var = {0, 0, 0, 0};
+
           rows.push_back(row);
         }
       }
@@ -502,7 +497,7 @@ public:
         for (int k = 0; k < d_.gateNumber; ++k) {
           GRBLinExpr left_hand_side = arrival_time[j] - arrival_time[i];
           GRBLinExpr right_hand_side =
-              BIG_M * (y_[{i, j, k}] - 1) + d_.bufferTime;
+              BIG_M * (y_val[{i, j, k}] - 1) + d_.bufferTime;
 
           Row row;
           row.constr =
@@ -511,12 +506,11 @@ public:
                                 to_string(j) + "_" + to_string(k));
 
           row.constant = d_.bufferTime - static_cast<double>(BIG_M);
-          row.x_coeff = 0.0;
+
           row.y_coeff = static_cast<double>(BIG_M);
-          row.z_coeff = 0.0;
-          row.x_var = {0, 0};
+
           row.y_var = {i, j, k};
-          row.z_var = {0, 0, 0, 0};
+
           rows.push_back(row);
         }
       }
@@ -528,7 +522,7 @@ public:
         for (int k = 0; k < d_.gateNumber; ++k) {
           GRBLinExpr left_hand_side = arrival_time[j] - departure_time[i];
           GRBLinExpr right_hand_side =
-              BIG_M * (y_[{i, j, k}] - 1) + d_.bufferTime;
+              BIG_M * (y_val[{i, j, k}] - 1) + d_.bufferTime;
 
           Row row;
           row.constr =
@@ -537,12 +531,10 @@ public:
                                 "_" + to_string(j) + "_" + to_string(k));
 
           row.constant = d_.bufferTime - static_cast<double>(BIG_M);
-          row.x_coeff = 0.0;
+
           row.y_coeff = static_cast<double>(BIG_M);
-          row.z_coeff = 0.0;
-          row.x_var = {0, 0};
+
           row.y_var = {i, j, k};
-          row.z_var = {0, 0, 0, 0};
 
           rows.push_back(row);
         }
@@ -556,7 +548,7 @@ public:
           continue;
         for (int k = 0; k < d_.gateNumber; ++k) {
           GRBLinExpr left_hand_side = departure_time[j] - departure_time[i];
-          GRBLinExpr right_hand_side = BIG_M * (y_[{i, j, k}] - 1) +
+          GRBLinExpr right_hand_side = BIG_M * (y_val[{i, j, k}] - 1) +
                                        d_.bufferTime + departure_pert.at(j);
 
           Row row;
@@ -567,12 +559,11 @@ public:
 
           row.constant = d_.bufferTime - static_cast<double>(BIG_M) +
                          static_cast<double>(departure_pert.at(j));
-          row.x_coeff = 0.0;
+
           row.y_coeff = static_cast<double>(BIG_M);
-          row.z_coeff = 0.0;
-          row.x_var = {0, 0};
+
           row.y_var = {i, j, k};
-          row.z_var = {0, 0, 0, 0};
+
           rows.push_back(row);
         }
       }
@@ -585,12 +576,7 @@ public:
           sub.addConstr(departure_time[j] >= d_.flightMap.at(j).scheduled_time,
                         "SubScheduledTimeConstr_" + to_string(j));
       row.constant = static_cast<double>(d_.flightMap.at(j).scheduled_time);
-      row.x_coeff = 0.0;
-      row.y_coeff = 0.0;
-      row.z_coeff = 0.0;
-      row.x_var = {0, 0};
-      row.y_var = {0, 0, 0};
-      row.z_var = {0, 0, 0, 0};
+
       rows.push_back(row);
     }
 
@@ -601,12 +587,7 @@ public:
           sub.addConstr(arrival_time[j] >= data.flightMap.at(j).scheduled_time,
                         "SubArrivalScheduledTimeConstr_" + to_string(j));
       row.constant = static_cast<double>(d_.flightMap.at(j).scheduled_time);
-      row.x_coeff = 0.0;
-      row.y_coeff = 0.0;
-      row.z_coeff = 0.0;
-      row.x_var = {0, 0};
-      row.y_var = {0, 0, 0};
-      row.z_var = {0, 0, 0, 0};
+
       rows.push_back(row);
     }
 
@@ -619,12 +600,7 @@ public:
                                  "SubArrivalDelayConstr_" + to_string(j));
 
       row.constant = -static_cast<double>(d_.flightMap.at(j).scheduled_time);
-      row.x_coeff = 0.0;
-      row.y_coeff = 0.0;
-      row.z_coeff = 0.0;
-      row.x_var = {0, 0};
-      row.y_var = {0, 0, 0};
-      row.z_var = {0, 0, 0, 0};
+
       rows.push_back(row);
     }
 
@@ -706,39 +682,53 @@ public:
 
   void solve_with_callback(vector<caseData> &senarios) {
     master_.set(GRB_IntParam_LazyConstraints, 1);
-    BendersCallback cb(this, senarios);
+    BendersCallback cb(*this, senarios);
     master_.setCallback(&cb);
     master_.optimize();
-    master_.setCallback(nullptr); // 取消回调，准备添加割
+    master_.setCallback(nullptr); // 取消回调
   }
 
 private:
   class BendersCallback : public GRBCallback {
   private:
-    Solver *solver_;
+    Solver &solver_;
     vector<caseData> senarios_;
 
   protected:
     void callback() override {
       if (where == GRB_CB_MIPSOL) {
+
         int senario_num = senarios_.size();
-        double weight = 1.0 / static_cast<double>(senario_num); // 平均分配权重
+        double weight =
+            1.0 / static_cast<double>(senario_num); // 平均分配每个场景的权重
         GRBLinExpr RHS = 0.0;
+
+        unordered_map<yKey, double> y_val; // 存储当前整数解中 y 变量的取值
+        unordered_map<zKey, double> z_val; // 存储当前整数解中 z 变量的取值
+
+        for (auto &[key, var] : solver_.y_) {
+          y_val[key] = getSolution(var);
+        }
+        for (auto &[key, var] : solver_.z_) {
+          z_val[key] = getSolution(var);
+        }
+
         for (caseData &senario : senarios_) {
-          auto [sub, rows] = solver_->build_single_senario_subproblem(senario);
-          auto [status, cut] = solver_->get_cut(sub, rows, weight);
+          auto [sub, rows] =
+              solver_.build_single_senario_subproblem(senario, y_val, z_val);
+          auto [status, cut] = solver_.get_cut(sub, rows, weight);
           if (status == GRB_INFEASIBLE) {
             addLazy(cut <= 0);
           } else if (status == GRB_OPTIMAL) {
             RHS += cut;
           }
         }
-        addLazy(solver_->eta_ >= RHS);
+        addLazy(solver_.eta_ >= RHS);
       }
     }
 
   public:
-    BendersCallback(Solver *solver, const vector<caseData> &senarios)
+    BendersCallback(Solver &solver, const vector<caseData> &senarios)
         : solver_(solver), senarios_(senarios) {}
   };
 
@@ -755,83 +745,13 @@ private:
   GRBModel master_;
   GRBVar eta_;
   vector<vector<GRBVar>> x_;
-  std::unordered_map<yKey, GRBVar, yKeyHash> y_;
-  std::unordered_map<zKey, GRBVar, zKeyHash> z_;
+  unordered_map<yKey, GRBVar, yKeyHash> y_;
+  unordered_map<zKey, GRBVar, zKeyHash> z_;
 };
 
 int main() {
-  auto env = GRBEnv(true);
-  env.set("LogFile", "gate_assignment.log");
-  env.start();
 
-  auto m = GRBModel(env);
-
-  auto d = makeSampleCaseData();
-
-  vector<vector<GRBVar>> x(d.flightNumber, vector<GRBVar>(d.gateNumber + 1));
-  // 决策变量 x[i][j]，表示航班 i 是否分配到登机口 j , x[i][d.apronIndex]
-  // 表示航班 i 分配停机坪
-
-  for (int i = 0; i < d.flightNumber; ++i) {
-    for (int j = 0; j <= d.gateNumber; ++j) {
-      auto varName = "x_" + to_string(i) + "_" + to_string(j);
-      if (j < d.gateNumber)
-        x[i][j] = m.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
-      else
-        x[i][j] =
-            m.addVar(0.0, 1.0, d.apronPenaltyCost[i], GRB_BINARY, varName);
-      // 航班的停机坪分配成本
-    }
-  }
-
-  for (auto i : d.noDepartArr) {
-    for (int k = 0; k < d.gateNumber; ++k) {
-      x[i][k].set(GRB_DoubleAttr_Obj, d.towCost[k][d.apronIndex]);
-    }
-  } // 对于到达后不离开的航班，设置拖行到停机坪的成本
-
-  auto eta = m.addVar(0.0, GRB_INFINITY, 1.0, GRB_CONTINUOUS, "eta");
-  // =延误成本 + 拖行成本
-
-  m.set(GRB_IntAttr_ModelSense, GRB_MINIMIZE); // 最小化
-
-  for (auto i = 0; i < d.flightNumber; ++i) {
-    GRBLinExpr expr = 0;
-    for (int j = 0; j <= d.gateNumber; ++j) {
-      expr += x[i][j];
-    }
-    m.addConstr(expr == 1, "AssignConstr_" + to_string(i));
-  } // 每个航班分配一个登机口或停机坪
-
-  for (auto i : d.largeFlights) {
-    for (auto k : d.mediumGates) {
-      m.addConstr(x[i][k] == 0,
-                  "Flight-GateConstr_" + to_string(i) + "_" + to_string(k));
-    }
-  } // 大型飞机不能分配到中等大小登机口
-
-  // 写一个benders分解， 主问题算x， 子问题算 x的延误成本和拖行成本
-  double LB = 0.0, UB = 1e6, eps = 10.0;
-
-  while (UB - LB > eps) {
-    m.optimize();
-    auto Y = determine_Y(x, d.flights);
-    sparseZ Z;
-    double tow_cost = calculateTowCost(env, d, x, Y, Z);
-    double delay_cost = calculateDelayCost(env, d, x, Y, Z);
-    double total_cost = tow_cost + delay_cost;
-
-    // cTx + eta - eta + total_cost
-    UB = std::min(UB, m.get(GRB_DoubleAttr_ObjVal) - eta.get(GRB_DoubleAttr_X) +
-                          total_cost);
-
-    // 添加割
-    /*  待补充的内容 */
-
-    LB = std::max(LB, m.get(GRB_DoubleAttr_ObjVal));
-
-    std::cout << "Current LB: " << LB << ", UB: " << UB << std::endl;
-  }
+  //
 
   return 0;
 }
