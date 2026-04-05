@@ -4,6 +4,9 @@ target("gate_assignment")
 
     set_languages("c++20")
 
+    -- for all source/target encodings
+    set_encodings("utf-8") -- msvc: /utf-8
+
     set_kind("binary")
     add_files("src/*.cpp|mip1.cpp")
 

@@ -1,12 +1,13 @@
 #include "gurobi_c++.h"
 
 #include "case_data.hpp"
-#include "gurobi_c.h"
 #include "modelDef.hpp"
 
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -188,7 +189,8 @@ double calculateDelayCost(const GRBEnv &env, const caseData &d,
 class Solver {
 public:
   Solver(const caseData &standard)
-      : d_(standard), env_(createEnv("gate_assignment.log")), master_(env_) {}
+      : d_(standard), env_(createEnv("gate_assignment.log")), master_(env_),
+        sub_env_(createEnv("gate_assignment_sub.log")) {}
 
   void build_master_problem() {
     int flight_number = d_.flightNumber;
@@ -196,43 +198,31 @@ public:
     const auto &no_depart_arr = d_.noDepartArr;
 
     x_.resize(flight_number, vector<GRBVar>(gate_number + 1));
-    // 决策变量 x[i][j]，表示航班 i 是否分配到登机口 j , x[i][d.apronIndex]
-    // 表示航班 i 分配停机坪
+    // 决策变量 x[i][j]，表示航班 i 是否分配到登机口 j
+    // ,x[i][d.apronIndex]表示航班 i 分配停机坪
     for (int i = 0; i < flight_number; ++i) {
       for (int k = 0; k <= gate_number; ++k) {
         auto varName = "x_" + to_string(i) + "_" + to_string(k);
-        if (k < gate_number) { // 如果分配到登机口
-          if (std::find(no_depart_arr.begin(), no_depart_arr.end(), i) ==
-              no_depart_arr.end()) {
-            x_[i][k] = master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
-          } else // 如果是到达后不离开的，增加拖行到停机坪的成本
-            x_[i][k] = master_.addVar(0.0, 1.0, d_.towCost[k][d_.apronIndex],
-                                      GRB_BINARY, varName);
-        } else {
-          // 分配到停机坪的惩罚成本
-          x_[i][k] = master_.addVar(0.0, 1.0, d_.apronPenaltyCost[i],
-                                    GRB_BINARY, varName);
-        }
-        // 航班的停机坪分配成本
+        // 分配到停机坪的惩罚成本
+        x_[i][k] = master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
       }
     }
-    //---------------------------
-    // 决策变量  y[i][j][k]，表示航班 i 和 j 在登机口 k 连续执行
-    int virtual_start_flight = flight_number;   // 虚拟起始航班索引
-    int virtual_end_flight = flight_number + 1; // 虚拟结束航班索引
 
-    for (int i = 0; i <= flight_number + 1; ++i) {
-      for (int j = 0; j <= flight_number + 1; ++j) {
-        for (int k = 0; k <= gate_number; ++k) {
+    //---------------------------
+    // 决策变量  y[i][j][k]，表示航班 i 和 j 在登机口 k 连续执行, k不包括停机坪
+    for (int i = 0; i < flight_number; ++i) {
+      for (int j = 0; j < flight_number; ++j) {
+        for (int k = 0; k < gate_number; ++k) {
           auto varName =
               "y_" + to_string(i) + "_" + to_string(j) + "_" + to_string(k);
           y_[{i, j, k}] = master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
         }
       }
     }
-    //---------------------------- z_i_j_u_v
-    // 决策变量 z[i][j][u][v]，表示关联航班 i 和 j 从 登机口 u 拖行到 v
 
+    //---------------------------- z_i_j_u_v
+    // 决策变量 z[i][j][u][v]，表示关联航班 i 和 j 从 登机口 u 拖行到 v，uv
+    // 包括停机坪
     for (int i : d_.haveDepartArr) {
       int j = d_.delta.at(i); // 到港航班 i 对应的离开航班ID
 
@@ -241,21 +231,20 @@ public:
           auto varName = "z_" + to_string(i) + "_" + to_string(j) + "_" +
                          to_string(u) + "_" + to_string(v);
 
-          z_[{i, j, u, v}] =
-              master_.addVar(0.0, 1.0, d_.towCost[u][v], GRB_BINARY, varName);
+          z_[{i, j, u, v}] = master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
         }
       }
     }
 
     // 非线性部分
-    eta_ = master_.addVar(0.0, GRB_INFINITY, 1.0, GRB_CONTINUOUS, "eta");
+    eta_ = master_.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS, "eta");
 
     // 主问题约束------------------------
     // 每个航班分配一个登机口或停机坪
     for (int i = 0; i < flight_number; ++i) {
       GRBLinExpr expr = 0;
-      for (int j = 0; j <= gate_number; ++j) {
-        expr += x_[i][j];
+      for (int k = 0; k <= gate_number; ++k) {
+        expr += x_[i][k];
       }
       master_.addConstr(expr == 1, "AssignConstr_" + to_string(i));
     }
@@ -268,88 +257,72 @@ public:
       }
     }
 
-    // 每个航班都有后续航班或者到虚拟结束航班
+    // 禁止自环
+    for (int k = 0; k < gate_number; ++k) {
+      for (int i = 0; i < flight_number; ++i) {
+        master_.addConstr(y_[{i, i, k}] == 0);
+      }
+    }
+
+    for (int k = 0; k < gate_number; ++k) {
+      for (int i = 0; i < flight_number; ++i) {
+        for (int j = 0; j < flight_number; ++j) {
+          master_.addConstr(y_[{i, j, k}] + y_[{j, i, k}] <= 1,
+                            "NoCycleConstr_" + to_string(i) + "_" +
+                                to_string(j) + "_" + to_string(k));
+        }
+      }
+    }
+
+    // 被选中才能出边入边
     for (int i = 0; i < flight_number; ++i) {
       for (int k = 0; k < gate_number; ++k) {
-        GRBLinExpr right_hand_side = 0;
+        GRBLinExpr expr1 = 0;
+        GRBLinExpr expr2 = 0;
         for (int j = 0; j < flight_number; ++j) {
-          if (j != i) {
-            right_hand_side += y_[{i, j, k}];
-          }
+          expr1 += y_[{i, j, k}];
+          expr2 += y_[{j, i, k}];
         }
-        right_hand_side += y_[{i, virtual_end_flight,
-                               k}]; // i 后面没有航班了，直接到虚拟结束航班
-        master_.addConstr(x_[i][k] == right_hand_side, "GateSuccessionConstr_" +
-                                                           to_string(i) + "_" +
-                                                           to_string(k));
+        master_.addConstr(expr1 <= x_[i][k],
+                          "Y_X_Constr1_" + to_string(i) + "_" + to_string(k));
+        master_.addConstr(expr2 <= x_[i][k],
+                          "Y_X_Constr2_" + to_string(i) + "_" + to_string(k));
+        master_.addConstr(expr1 <= 1, "Y_OneOutConstr_" + to_string(i) + "_" +
+                                          to_string(k));
+        master_.addConstr(expr2 <= 1,
+                          "Y_OneInConstr_" + to_string(i) + "_" + to_string(k));
       }
     }
 
-    // 虚拟起始航班有一个后续
+    // 边数=点数-1
     for (int k = 0; k < gate_number; ++k) {
-      GRBLinExpr left_hand_side = 0;
-      for (int j = 0; j < flight_number; ++j) {
-        left_hand_side += y_[{virtual_start_flight, j, k}];
-      }
-      left_hand_side += y_[{virtual_start_flight, virtual_end_flight, k}];
-      master_.addConstr(left_hand_side == 1,
-                        "VirtualStartConstr_" + to_string(k));
-    }
-
-    // 虚拟终止航班有一个前驱
-    for (int k = 0; k < gate_number; ++k) {
-      GRBLinExpr left_hand_side = 0;
-      for (int j = 0; j < flight_number; ++j) {
-        left_hand_side += y_[{j, virtual_end_flight, k}];
-      }
-      left_hand_side += y_[{virtual_start_flight, virtual_end_flight, k}];
-      master_.addConstr(left_hand_side == 1,
-                        "VirtualEndConstr_" + to_string(k));
-    }
-
-    // 航班分配约束
-    for (int i = 0; i < flight_number; ++i) {
-      for (int k = 0; k < gate_number; ++k) {
-        GRBLinExpr left_hand_side = 0;
-        GRBLinExpr right_hand_side = 0;
+      GRBLinExpr lhs = 0;
+      GRBLinExpr rhs = 0;
+      for (int i = 0; i < flight_number; ++i) {
+        rhs += x_[i][k];
         for (int j = 0; j < flight_number; ++j) {
-          if (j != i) {
-            left_hand_side += y_[{j, i, k}];
-            right_hand_side += y_[{i, j, k}];
-          }
+          lhs += y_[{i, j, k}];
         }
-        left_hand_side += y_[{virtual_start_flight, i, k}];
-        right_hand_side += y_[{i, virtual_end_flight, k}];
-
-        master_.addConstr(left_hand_side == right_hand_side,
-                          "FlowConstr_" + to_string(i) + "_" + to_string(k));
       }
+      master_.addConstr(lhs == rhs - 1, "Y_ConsistencyConstr_" + to_string(k));
     }
 
     // 拖行约束
     for (int i : d_.haveDepartArr) {
       int delta_i = d_.delta.at(i);
-      for (int u = 0; u < gate_number; ++u) {
-        for (int v = 0; v < gate_number; ++v) {
-          if (v != u) {
-            master_.addConstr(
-                z_[{i, delta_i, u, v}] >= x_[i][u] + x_[delta_i][v] - 1,
-                "TowConstr1_" + to_string(i) + "_" + to_string(delta_i) + "_" +
-                    to_string(u) + "_" + to_string(v));
-            master_.addConstr(z_[{i, delta_i, u, v}] <= x_[i][u],
-                              "TowConstr2_" + to_string(i) + "_" +
-                                  to_string(delta_i));
-            master_.addConstr(z_[{i, delta_i, u, v}] <= x_[delta_i][v],
-                              "TowConstr3_" + to_string(i) + "_" +
-                                  to_string(delta_i) + "_" + to_string(v));
-          }
+      for (int u = 0; u <= gate_number; ++u) {
+        for (int v = 0; v <= gate_number; ++v) {
+          master_.addConstr(
+              z_[{i, delta_i, u, v}] >= x_[i][u] + x_[delta_i][v] - 1,
+              "TowConstr1_" + to_string(i) + "_" + to_string(delta_i) + "_" +
+                  to_string(u) + "_" + to_string(v));
+          master_.addConstr(z_[{i, delta_i, u, v}] <= x_[i][u],
+                            "TowConstr2_" + to_string(i) + "_" +
+                                to_string(delta_i));
+          master_.addConstr(z_[{i, delta_i, u, v}] <= x_[delta_i][v],
+                            "TowConstr3_" + to_string(i) + "_" +
+                                to_string(delta_i) + "_" + to_string(v));
         }
-
-        int k = u; // 同一登机口的情况
-        master_.addConstr(x_[i][k] + x_[delta_i][k] - y_[{i, delta_i, k}] <=
-                              z_[{i, delta_i, k, k}] + 1,
-                          "TowConstrSameGate_" + to_string(i) + "_" +
-                              to_string(delta_i) + "_" + to_string(k));
       }
     }
 
@@ -358,9 +331,6 @@ public:
       for (int j : d_.largeFlights) {
         if (j != i) {
           for (int k = 0; k < gate_number; ++k) {
-            if (std::find(d_.mediumGates.begin(), d_.mediumGates.end(), k) !=
-                d_.mediumGates.end())
-              continue;
             master_.addConstr(x_[i][k] + x_[j][(k + 1) % gate_number] <= 1,
                               "ShadowConstr_" + to_string(i) + "_" +
                                   to_string(j) + "_" + to_string(k));
@@ -368,14 +338,63 @@ public:
         }
       }
     }
+
+    GRBLinExpr obj_func = 0.0;
+
+    for (int i = 0; i < flight_number; ++i) {
+      obj_func += d_.apronPenaltyCost[i] * x_[i][d_.apronIndex];
+    }
+
+    for (int i : d_.haveDepartArr) {
+      int delta_i = d_.delta.at(i);
+      for (int u = 0; u <= gate_number; ++u) {
+        for (int v = 0; v <= gate_number; ++v) {
+          obj_func += d_.towCost[u][v] * z_[{i, delta_i, u, v}];
+        }
+      }
+    }
+
+    for (int i : d_.noDepartArr) {
+      for (int k = 0; k < gate_number; ++k) {
+        obj_func += d_.towCost[k][d_.apronIndex] * x_[i][k];
+      }
+    }
+
+    obj_func += eta_;
+
+    master_.setObjective(obj_func);
   }
 
-  std::pair<GRBModel, vector<Row>>
-  build_single_senario_subproblem(caseData &data,
-                                  unordered_map<yKey, double> &y_val,
-                                  unordered_map<zKey, double> &z_val) {
+  std::pair<std::unique_ptr<GRBModel>, vector<Row>>
+  build_single_senario_subproblem(
+      caseData &data, unordered_map<yKey, double, yKeyHash> &y_val,
+      unordered_map<zKey, double, zKeyHash> &z_val) {
 
-    GRBModel sub(env_);
+    // === 添加调试输出 ===
+    std::cout << "=== build_single_senario_subproblem ===" << std::endl;
+    std::cout << "d_.flightNumber = " << d_.flightNumber << std::endl;
+    std::cout << "d_.departFlights.size() = " << d_.departFlights.size()
+              << std::endl;
+    std::cout << "d_.noDepartArr.size() = " << d_.noDepartArr.size()
+              << std::endl;
+    std::cout << "d_.haveDepartArr.size() = " << d_.haveDepartArr.size()
+              << std::endl;
+    std::cout << "data.departure_pert.size() = " << data.departure_pert.size()
+              << std::endl;
+    std::cout << "y_val.size() = " << y_val.size() << std::endl;
+    std::cout << "z_val.size() = " << z_val.size() << std::endl;
+    if (!d_.departFlights.empty()) {
+      std::cout << "d_.departFlights[0] = " << d_.departFlights[0] << std::endl;
+    }
+    // ====================
+
+    auto sub_ptr = std::make_unique<GRBModel>(sub_env_);
+    GRBModel &sub = *sub_ptr; // 获取引用以便后续使用
+
+    // GRBModel sub(sub_env_);
+
+    sub.set(GRB_IntParam_InfUnbdInfo, 1);
+    sub.set(GRB_IntParam_DualReductions, 0);
 
     int flight_number = d_.flightNumber;
     auto departure_pert = data.departure_pert;
@@ -429,10 +448,7 @@ public:
 
     // 3-19
     for (int i : d_.noDepartArr) {
-      int delta_i = d_.delta.at(i);
       for (int j : d_.departFlights) {
-        if (j == delta_i)
-          continue;
         for (int k = 0; k < d_.gateNumber; ++k) {
           GRBLinExpr left_hand_side = departure_time[j] - arrival_time[i];
           GRBLinExpr right_hand_side = BIG_M * (y_val[{i, j, k}] - 1) +
@@ -459,8 +475,10 @@ public:
     for (int i : d_.haveDepartArr) {
       int delta_i = d_.delta.at(i);
       for (int j : d_.departFlights) {
+        /*
         if (j == delta_i)
           continue;
+        */
         for (int k = 0; k < d_.gateNumber; ++k) {
           GRBLinExpr left_hand_side = departure_time[j] - arrival_time[i];
           GRBLinExpr right_hand_side = BIG_M * (y_val[{i, j, k}] - 1) +
@@ -617,11 +635,17 @@ public:
 
     sub.setObjective(objective);
 
-    return {sub, rows};
+    sub.update();
+
+    // return {std::make_unique<GRBModel>(std::move(sub)), rows};
+    return {std::move(sub_ptr), rows};
   }
 
   std::pair<int, GRBLinExpr> get_cut(GRBModel &sub, const vector<Row> &rows,
                                      const double weight) {
+
+    sub.set(GRB_IntParam_InfUnbdInfo, 1);
+    sub.set(GRB_IntParam_DualReductions, 0);
     sub.optimize(); // 求解子问题
 
     int status = sub.get(GRB_IntAttr_Status);
@@ -641,7 +665,9 @@ public:
     GRBLinExpr lhs = 0.0;
     for (const auto &row : rows) {
       GRBLinExpr expr = 0.0;
-      double lambda_i = row.constr.get(GRB_DoubleAttr_FarkasDual);
+      double lambda_i = -row.constr.get(GRB_DoubleAttr_FarkasDual);
+      if (fabs(lambda_i) < 1e-6)
+        continue;
       expr += row.constant;
       if (row.x_coeff != 0.0) {
         expr += row.x_coeff * x_[row.x_var.first][row.x_var.second];
@@ -663,6 +689,8 @@ public:
     for (const auto &row : rows) {
       GRBLinExpr expr = 0.0;
       double pi_i = row.constr.get(GRB_DoubleAttr_Pi);
+      if (fabs(pi_i) < 1e-6)
+        continue;
       expr += row.constant;
       if (row.x_coeff != 0.0) {
         expr += row.x_coeff * x_[row.x_var.first][row.x_var.second];
@@ -688,6 +716,79 @@ public:
     master_.setCallback(nullptr); // 取消回调
   }
 
+  void final_solution_feasibility_check() {
+    // 取最终解
+    unordered_map<yKey, double, yKeyHash> y_val;
+    unordered_map<zKey, double, zKeyHash> z_val;
+
+    for (auto &[key, var] : y_) {
+      y_val[key] = var.get(GRB_DoubleAttr_X);
+    }
+    for (auto &[key, var] : z_) {
+      z_val[key] = var.get(GRB_DoubleAttr_X);
+    }
+
+    //  构建子问题
+    auto [sub_ptr, rows] = build_single_senario_subproblem(d_, y_val, z_val);
+    auto &sub = *sub_ptr; // 获取引用以便后续使用
+
+    // 关闭dual reduction（保持一致）
+    sub.set(GRB_IntParam_InfUnbdInfo, 1);
+    sub.set(GRB_IntParam_DualReductions, 0);
+
+    //  求解
+    sub.optimize();
+
+    // 判断结果
+    int status = sub.get(GRB_IntAttr_Status);
+
+    if (status == GRB_OPTIMAL) {
+      std::cout << "Final solution: subproblem FEASIBLE " << std::endl;
+      print_solution();
+    } else if (status == GRB_INFEASIBLE) {
+      std::cout << "Final solution: subproblem INFEASIBLE " << std::endl;
+      sub.computeIIS(); // 计算不可行子系统
+      std::string iis_path = "D:/PYPJ/qbota/infeasible_subproblem.ilp";
+      sub.write(iis_path);
+    } else {
+      std::cout << "Final solution: subproblem status = " << status
+                << std::endl;
+    }
+  }
+
+  void print_solution() {
+    std::cout << "=== Final Solution ===" << std::endl;
+    for (int i = 0; i < d_.flightNumber; ++i) {
+      for (int k = 0; k <= d_.gateNumber; ++k) {
+        double x_val = x_[i][k].get(GRB_DoubleAttr_X);
+        if (x_val > 0.5) {
+          std::cout << "Flight " << i << " assigned to gate " << k << " with x["
+                    << i << "][" << k << "] = " << x_val << std::endl;
+        }
+      }
+    }
+
+    for (auto &[key, var] : y_) {
+      double y_val = var.get(GRB_DoubleAttr_X);
+      if (y_val > 0.5) {
+        std::cout << "y[{" << key.i << "," << key.j << "," << key.k
+                  << "}] = " << y_val << std::endl;
+      }
+    }
+
+    for (auto &[key, var] : z_) {
+      double z_val = var.get(GRB_DoubleAttr_X);
+      if (z_val > 0.5) {
+        std::cout << "z[{" << key.i << "," << key.delta_i << "," << key.u << ","
+                  << key.v << "}] = " << z_val << std::endl;
+      }
+    }
+
+    std::cout << "eta value:" << eta_.get(GRB_DoubleAttr_X) << std::endl;
+  }
+
+  double get_objective_value() { return master_.get(GRB_DoubleAttr_ObjVal); }
+
 private:
   class BendersCallback : public GRBCallback {
   private:
@@ -697,33 +798,60 @@ private:
   protected:
     void callback() override {
       if (where == GRB_CB_MIPSOL) {
+        try {
+          int senario_num = senarios_.size();
+          double weight =
+              1.0 / static_cast<double>(senario_num); // 平均分配每个场景的权重
+          GRBLinExpr RHS = 0.0;
 
-        int senario_num = senarios_.size();
-        double weight =
-            1.0 / static_cast<double>(senario_num); // 平均分配每个场景的权重
-        GRBLinExpr RHS = 0.0;
+          unordered_map<yKey, double, yKeyHash>
+              y_val; // 存储当前整数解中 y 变量的取值
+          unordered_map<zKey, double, zKeyHash>
+              z_val; // 存储当前整数解中 z 变量的取值
 
-        unordered_map<yKey, double> y_val; // 存储当前整数解中 y 变量的取值
-        unordered_map<zKey, double> z_val; // 存储当前整数解中 z 变量的取值
-
-        for (auto &[key, var] : solver_.y_) {
-          y_val[key] = getSolution(var);
-        }
-        for (auto &[key, var] : solver_.z_) {
-          z_val[key] = getSolution(var);
-        }
-
-        for (caseData &senario : senarios_) {
-          auto [sub, rows] =
-              solver_.build_single_senario_subproblem(senario, y_val, z_val);
-          auto [status, cut] = solver_.get_cut(sub, rows, weight);
-          if (status == GRB_INFEASIBLE) {
-            addLazy(cut <= 0);
-          } else if (status == GRB_OPTIMAL) {
-            RHS += cut;
+          for (auto &[key, var] : solver_.y_) {
+            y_val[key] = getSolution(var);
           }
-        }
-        addLazy(solver_.eta_ >= RHS);
+          for (auto &[key, var] : solver_.z_) {
+            z_val[key] = getSolution(var);
+          }
+
+          for (int i = 0; i < solver_.d_.flightNumber; ++i) {
+            for (int k = 0; k <= solver_.d_.gateNumber; ++k) {
+              double x_val = getSolution(solver_.x_[i][k]);
+              if (x_val > 0.5) {
+                std::cout << "x_[" << i << "][" << k << "] = " << x_val
+                          << std::endl;
+              }
+            }
+          }
+
+          for (auto &[key, val] : y_val) {
+            if (val > 0.5) {
+              std::cout << "y_val[{" << key.i << "," << key.j << "," << key.k
+                        << "}] = " << val << std::endl;
+            }
+          }
+
+          for (caseData &senario : senarios_) {
+            auto [sub_ptr, rows] =
+                solver_.build_single_senario_subproblem(senario, y_val, z_val);
+            auto [status, cut] = solver_.get_cut(*sub_ptr, rows, weight);
+            if (status == GRB_INFEASIBLE) {
+              addLazy(cut <= 0);
+            } else if (status == GRB_OPTIMAL) {
+              RHS += cut;
+            }
+          }
+          addLazy(solver_.eta_ >= RHS);
+        } catch (const GRBException &e) {
+          std::cerr << "Gurobi error in callback: " << e.getMessage()
+                    << std::endl;
+        } catch (const std::exception &e) {
+          std::cerr << "Exception in callback: " << e.what() << std::endl;
+        } catch (...) {
+          std::cerr << "Unknown exception in callback" << std::endl;
+        } // === 添加 catch ===
       }
     }
 
@@ -742,6 +870,7 @@ private:
   caseData d_;
   int BIG_M = 1450;
   GRBEnv env_;
+  GRBEnv sub_env_;
   GRBModel master_;
   GRBVar eta_;
   vector<vector<GRBVar>> x_;
@@ -749,9 +878,114 @@ private:
   unordered_map<zKey, GRBVar, zKeyHash> z_;
 };
 
+double calculate_distance(std::pair<double, double> coord1,
+                          std::pair<double, double> coord2) {
+  double dx = coord1.first - coord2.first;
+  double dy = coord1.second - coord2.second;
+  return std::sqrt(dx * dx + dy * dy);
+}
+
+caseData read_case_data(const std::string &filePath) {
+  std::ifstream f(filePath);
+
+  if (!f.is_open()) {
+    std::cerr << "Failed to open file: " << filePath << std::endl;
+    exit(1);
+  }
+
+  int flight_number, gate_number, buffer_time, apron_penalty, delay_penalty;
+  double tow_speed;
+  f >> flight_number >> gate_number >> buffer_time >> apron_penalty >>
+      delay_penalty >> tow_speed;
+
+  double penalty_per_meter = 30.0 / 2000.0;
+
+  auto apron_penalty_cost = vector<double>(flight_number, apron_penalty);
+  auto delay_penalty_cost = vector<double>(flight_number, delay_penalty);
+  unordered_map<int, std::pair<double, double>> gate_coords;
+  vector<int> medium_gates;
+  vector<int> large_flights;
+  vector<int> departFlights;
+  vector<int> noDepartArr;
+  vector<int> haveDepartArr;
+  map<int, int> delta;
+
+  for (int i = 0; i <= gate_number; ++i) {
+    int id;
+    double x, y;
+    std::string size;
+    f >> id >> x >> y >> size;
+    gate_coords[id] = {x, y};
+    if (size == "medium")
+      medium_gates.push_back(id);
+  }
+
+  vector<vector<double>> tow_time(gate_number + 1,
+                                  vector<double>(gate_number + 1));
+  vector<vector<double>> tow_cost(gate_number + 1,
+                                  vector<double>(gate_number + 1));
+
+  for (int i = 0; i <= gate_number; ++i) {
+    for (int j = 0; j <= gate_number; ++j) {
+      double distance = calculate_distance(gate_coords[i], gate_coords[j]);
+      tow_time[i][j] = distance / tow_speed;
+      tow_cost[i][j] = distance * penalty_per_meter;
+    }
+  }
+
+  vector<Flight> flights(flight_number);
+  unordered_map<int, int> departure_pert;
+
+  for (int i = 0; i < flight_number; ++i) {
+    int id, scheduled_time;
+    std::string type, size;
+    int departure_id, departure_perturbation;
+    f >> id >> scheduled_time >> type >> size >> departure_id >>
+        departure_perturbation;
+    flights[i] = Flight{id, type == "departure" ? DEPARTURE : ARRIVAL,
+                        size == "large" ? LARGE : MEDIUM, scheduled_time};
+    if (type == "arrival" and departure_id != -1) {
+      delta[id] = departure_id;
+      haveDepartArr.push_back(id);
+    }
+
+    if (type == "arrival" and departure_id == -1) {
+      noDepartArr.push_back(id);
+    }
+
+    if (type == "departure") {
+      departFlights.push_back(id);
+    }
+
+    if (size == "large") {
+      large_flights.push_back(id);
+    }
+
+    departure_pert[id] = departure_perturbation;
+  }
+
+  return makeCaseData(
+      flight_number, gate_number, buffer_time, apron_penalty_cost,
+      delay_penalty_cost, flights, noDepartArr, haveDepartArr, departFlights,
+      delta, medium_gates, large_flights, tow_cost, tow_time, departure_pert);
+}
+
 int main() {
 
-  //
+  caseData base_case = read_case_data("D:/PYPJ/qbota/toy_data1.txt");
+  vector<caseData> senarios = {base_case};
+  senarios.push_back(read_case_data("D:/PYPJ/qbota/toy_senario1.txt"));
+
+  Solver solver(base_case);
+  solver.build_master_problem();
+
+  solver.solve_with_callback(senarios);
+
+  std::cout << "Optimization complete." << std::endl;
+  std::cout << "Optimal objective value: " << solver.get_objective_value()
+            << std::endl;
+
+  solver.final_solution_feasibility_check();
 
   return 0;
 }
