@@ -208,6 +208,21 @@ public:
       }
     }
 
+    // 决策变量 gate_used_[k]，表示登机口 k 是否被使用
+    gate_used_.resize(gate_number);
+    for (int k = 0; k < gate_number; ++k) {
+      auto varName = "gate_used_" + to_string(k);
+      gate_used_[k] = master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
+    }
+
+    // 决策变量 flight_order_[i]，表示航班 i 的顺序，用于MTZ约束消除子环
+    flight_order_.resize(flight_number);
+    for (int i = 0; i < flight_number; ++i) {
+      auto varName = "flight_order_" + to_string(i);
+      flight_order_[i] =
+          master_.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS, varName);
+    }
+
     //---------------------------
     // 决策变量  y[i][j][k]，表示航班 i 和 j 在登机口 k 连续执行, k不包括停机坪
     for (int i = 0; i < flight_number; ++i) {
@@ -264,6 +279,8 @@ public:
       }
     }
 
+    // 原始版本消除子环约束
+    /*
     for (int k = 0; k < gate_number; ++k) {
       for (int i = 0; i < flight_number; ++i) {
         for (int j = 0; j < flight_number; ++j) {
@@ -273,6 +290,7 @@ public:
         }
       }
     }
+    */
 
     // 被选中才能出边入边
     for (int i = 0; i < flight_number; ++i) {
@@ -287,10 +305,34 @@ public:
                           "Y_X_Constr1_" + to_string(i) + "_" + to_string(k));
         master_.addConstr(expr2 <= x_[i][k],
                           "Y_X_Constr2_" + to_string(i) + "_" + to_string(k));
+        /*
         master_.addConstr(expr1 <= 1, "Y_OneOutConstr_" + to_string(i) + "_" +
                                           to_string(k));
         master_.addConstr(expr2 <= 1,
                           "Y_OneInConstr_" + to_string(i) + "_" + to_string(k));
+        */
+      }
+    }
+
+    for (int k = 0; k < gate_number; ++k) {
+      GRBLinExpr rhs = 0;
+      for (int i = 0; i < flight_number; ++i) {
+        rhs += x_[i][k];
+      }
+      master_.addConstr(gate_used_[k] <= rhs, "GateUsedConstr_" + to_string(k));
+      master_.addConstr(gate_used_[k] * flight_number * 2 >= rhs,
+                        "GateUsedConstr2_" + to_string(k));
+    }
+
+    // MTZ 约束
+    for (int k = 0; k < gate_number; ++k) {
+      for (int i = 0; i < flight_number; ++i) {
+        for (int j = 0; j < flight_number; ++j) {
+          master_.addConstr(
+              flight_order_[i] + 1 <=
+                  flight_order_[j] + 2 * flight_number * (1 - y_[{i, j, k}]),
+              "MTZ_" + to_string(i) + "_" + to_string(j) + "_" + to_string(k));
+        }
       }
     }
 
@@ -304,7 +346,8 @@ public:
           lhs += y_[{i, j, k}];
         }
       }
-      master_.addConstr(lhs == rhs - 1, "Y_ConsistencyConstr_" + to_string(k));
+      master_.addConstr(lhs == rhs - gate_used_[k],
+                        "Y_ConsistencyConstr_" + to_string(k));
     }
 
     // 拖行约束
@@ -883,6 +926,8 @@ private:
   GRBModel master_;
   GRBVar eta_;
   vector<vector<GRBVar>> x_;
+  vector<GRBVar> gate_used_;
+  vector<GRBVar> flight_order_;
   unordered_map<yKey, GRBVar, yKeyHash> y_;
   unordered_map<zKey, GRBVar, zKeyHash> z_;
 };
