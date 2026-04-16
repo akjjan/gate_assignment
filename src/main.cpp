@@ -686,6 +686,15 @@ public:
 
   GRBLinExpr get_optimality_cut(const vector<Row> &rows, const double weight) {
     GRBLinExpr rhs = 0.0;
+
+    // === 补上丢失的目标函数常数偏移量 ===
+    double obj_constant = 0.0;
+    for (int i : d_.departFlights) {
+      obj_constant -=
+          d_.delayPenaltyCost[i] * d_.flightMap.at(i).scheduled_time;
+    }
+    rhs += obj_constant; // 加到 RHS 里
+
     for (const auto &row : rows) {
       GRBLinExpr expr = 0.0;
       double pi_i = row.constr.get(GRB_DoubleAttr_Pi);
@@ -716,7 +725,7 @@ public:
     master_.setCallback(nullptr); // 取消回调
   }
 
-  void final_solution_feasibility_check() {
+  void final_solution_feasibility_check(caseData &data) {
     // 取最终解
     unordered_map<yKey, double, yKeyHash> y_val;
     unordered_map<zKey, double, zKeyHash> z_val;
@@ -729,7 +738,7 @@ public:
     }
 
     //  构建子问题
-    auto [sub_ptr, rows] = build_single_senario_subproblem(d_, y_val, z_val);
+    auto [sub_ptr, rows] = build_single_senario_subproblem(data, y_val, z_val);
     auto &sub = *sub_ptr; // 获取引用以便后续使用
 
     // 关闭dual reduction（保持一致）
@@ -868,7 +877,7 @@ private:
   }
 
   caseData d_;
-  int BIG_M = 1450;
+  int BIG_M = 100000;
   GRBEnv env_;
   GRBEnv sub_env_;
   GRBModel master_;
@@ -975,6 +984,7 @@ int main() {
   caseData base_case = read_case_data("D:/PYPJ/qbota/toy_data1.txt");
   vector<caseData> senarios = {base_case};
   senarios.push_back(read_case_data("D:/PYPJ/qbota/toy_senario1.txt"));
+  senarios.push_back(read_case_data("D:/PYPJ/qbota/toy_senario2.txt"));
 
   Solver solver(base_case);
   solver.build_master_problem();
@@ -985,7 +995,7 @@ int main() {
   std::cout << "Optimal objective value: " << solver.get_objective_value()
             << std::endl;
 
-  solver.final_solution_feasibility_check();
+  solver.final_solution_feasibility_check(senarios[1]);
 
   return 0;
 }
