@@ -4,6 +4,8 @@
 #include "modelDef.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -12,6 +14,11 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#define GREEN "\033[32m"
+#define RESET "\033[0m"
+
+namespace fs = std::filesystem;
 
 using std::map;
 using std::to_string;
@@ -192,7 +199,7 @@ public:
       : d_(standard), env_(createEnv("gate_assignment.log")), master_(env_),
         sub_env_(createEnv("gate_assignment_sub.log")) {}
 
-  void build_master_problem() {
+  void build_master_problem(int senarios_num) {
     int flight_number = d_.flightNumber;
     int gate_number = d_.gateNumber;
     const auto &no_depart_arr = d_.noDepartArr;
@@ -213,14 +220,6 @@ public:
     for (int k = 0; k < gate_number; ++k) {
       auto varName = "gate_used_" + to_string(k);
       gate_used_[k] = master_.addVar(0.0, 1.0, 0.0, GRB_BINARY, varName);
-    }
-
-    // 决策变量 flight_order_[i]，表示航班 i 的顺序，用于MTZ约束消除子环
-    flight_order_.resize(flight_number);
-    for (int i = 0; i < flight_number; ++i) {
-      auto varName = "flight_order_" + to_string(i);
-      flight_order_[i] =
-          master_.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS, varName);
     }
 
     //---------------------------
@@ -252,9 +251,29 @@ public:
     }
 
     // 非线性部分
-    eta_ = master_.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS, "eta");
+    // eta_ = master_.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS, "eta");
+    eta_.resize(senarios_num);
+    for (int s = 0; s < senarios_num; ++s) {
+      eta_[s] = master_.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS,
+                               "eta_" + to_string(s));
+    }
 
     // 主问题约束------------------------
+
+    // 提前筛除明显错误的分配y
+    for (int i = 0; i < flight_number; ++i) {
+      for (int j = 0; j < flight_number; ++j) {
+        for (int k = 0; k < gate_number; ++k) {
+          if (d_.flightMap.at(i).scheduled_time >=
+              d_.flightMap.at(j).scheduled_time) {
+            master_.addConstr(y_[{i, j, k}] == 0,
+                              "TimeOrderConstr_" + to_string(i) + "_" +
+                                  to_string(j) + "_" + to_string(k));
+          }
+        }
+      }
+    }
+
     // 每个航班分配一个登机口或停机坪
     for (int i = 0; i < flight_number; ++i) {
       GRBLinExpr expr = 0;
@@ -280,7 +299,6 @@ public:
     }
 
     // 原始版本消除子环约束
-    /*
     for (int k = 0; k < gate_number; ++k) {
       for (int i = 0; i < flight_number; ++i) {
         for (int j = 0; j < flight_number; ++j) {
@@ -290,7 +308,6 @@ public:
         }
       }
     }
-    */
 
     // 被选中才能出边入边
     for (int i = 0; i < flight_number; ++i) {
@@ -305,12 +322,24 @@ public:
                           "Y_X_Constr1_" + to_string(i) + "_" + to_string(k));
         master_.addConstr(expr2 <= x_[i][k],
                           "Y_X_Constr2_" + to_string(i) + "_" + to_string(k));
-        /*
+
         master_.addConstr(expr1 <= 1, "Y_OneOutConstr_" + to_string(i) + "_" +
                                           to_string(k));
         master_.addConstr(expr2 <= 1,
                           "Y_OneInConstr_" + to_string(i) + "_" + to_string(k));
-        */
+      }
+    }
+
+    for (int i = 0; i < flight_number; ++i) {
+      for (int j = 0; j < flight_number; ++j) {
+        for (int k = 0; k < gate_number; ++k) {
+          master_.addConstr(y_[{i, j, k}] <= x_[i][k],
+                            "Y_X_Constr3_" + to_string(i) + "_" + to_string(j) +
+                                "_" + to_string(k));
+          master_.addConstr(y_[{i, j, k}] <= x_[j][k],
+                            "Y_X_Constr4_" + to_string(i) + "_" + to_string(j) +
+                                "_" + to_string(k));
+        }
       }
     }
 
@@ -320,20 +349,8 @@ public:
         rhs += x_[i][k];
       }
       master_.addConstr(gate_used_[k] <= rhs, "GateUsedConstr_" + to_string(k));
-      master_.addConstr(gate_used_[k] * flight_number * 2 >= rhs,
+      master_.addConstr(gate_used_[k] * flight_number >= rhs,
                         "GateUsedConstr2_" + to_string(k));
-    }
-
-    // MTZ 约束
-    for (int k = 0; k < gate_number; ++k) {
-      for (int i = 0; i < flight_number; ++i) {
-        for (int j = 0; j < flight_number; ++j) {
-          master_.addConstr(
-              flight_order_[i] + 1 <=
-                  flight_order_[j] + 2 * flight_number * (1 - y_[{i, j, k}]),
-              "MTZ_" + to_string(i) + "_" + to_string(j) + "_" + to_string(k));
-        }
-      }
     }
 
     // 边数=点数-1
@@ -346,8 +363,7 @@ public:
           lhs += y_[{i, j, k}];
         }
       }
-      master_.addConstr(lhs == rhs - gate_used_[k],
-                        "Y_ConsistencyConstr_" + to_string(k));
+      master_.addConstr(lhs == rhs - 1, "Y_ConsistencyConstr_" + to_string(k));
     }
 
     // 拖行约束
@@ -403,7 +419,11 @@ public:
       }
     }
 
-    obj_func += eta_;
+    // obj_func += eta_;
+    double prob_weight = 1.0 / senarios_num;
+    for (int s = 0; s < senarios_num; ++s) {
+      obj_func += prob_weight * eta_[s];
+    }
 
     master_.setObjective(obj_func);
   }
@@ -414,6 +434,7 @@ public:
       unordered_map<zKey, double, zKeyHash> &z_val) {
 
     // === 添加调试输出 ===
+    std::cout << GREEN;
     std::cout << "=== build_single_senario_subproblem ===" << std::endl;
     std::cout << "d_.flightNumber = " << d_.flightNumber << std::endl;
     std::cout << "d_.departFlights.size() = " << d_.departFlights.size()
@@ -429,6 +450,7 @@ public:
     if (!d_.departFlights.empty()) {
       std::cout << "d_.departFlights[0] = " << d_.departFlights[0] << std::endl;
     }
+    std::cout << RESET; // 重置颜色
     // ====================
 
     auto sub_ptr = std::make_unique<GRBModel>(sub_env_);
@@ -684,8 +706,7 @@ public:
     return {std::move(sub_ptr), rows};
   }
 
-  std::pair<int, GRBLinExpr> get_cut(GRBModel &sub, const vector<Row> &rows,
-                                     const double weight) {
+  std::pair<int, GRBLinExpr> get_cut(GRBModel &sub, const vector<Row> &rows) {
 
     sub.set(GRB_IntParam_InfUnbdInfo, 1);
     sub.set(GRB_IntParam_DualReductions, 0);
@@ -696,7 +717,7 @@ public:
     if (status == GRB_INFEASIBLE) {
       return {status, get_feasibility_cut(rows)};
     } else if (status == GRB_OPTIMAL) {
-      return {status, get_optimality_cut(rows, weight)};
+      return {status, get_optimality_cut(rows)};
     } else {
       std::cerr << "Subproblem optimization ended with status " << status
                 << std::endl;
@@ -727,7 +748,7 @@ public:
     return lhs;
   }
 
-  GRBLinExpr get_optimality_cut(const vector<Row> &rows, const double weight) {
+  GRBLinExpr get_optimality_cut(const vector<Row> &rows) {
     GRBLinExpr rhs = 0.0;
 
     // === 补上丢失的目标函数常数偏移量 ===
@@ -756,7 +777,7 @@ public:
       expr *= pi_i;
       rhs += expr;
     }
-    rhs *= weight;
+    // rhs *= weight;
     return rhs;
   }
 
@@ -795,27 +816,30 @@ public:
     int status = sub.get(GRB_IntAttr_Status);
 
     if (status == GRB_OPTIMAL) {
-      std::cout << "Final solution: subproblem FEASIBLE " << std::endl;
+      std::cout << GREEN << "Final solution: subproblem FEASIBLE " << RESET
+                << std::endl;
       print_solution();
     } else if (status == GRB_INFEASIBLE) {
-      std::cout << "Final solution: subproblem INFEASIBLE " << std::endl;
+      std::cout << GREEN << "Final solution: subproblem INFEASIBLE " << RESET
+                << std::endl;
       sub.computeIIS(); // 计算不可行子系统
       std::string iis_path = "D:/PYPJ/qbota/infeasible_subproblem.ilp";
       sub.write(iis_path);
     } else {
-      std::cout << "Final solution: subproblem status = " << status
-                << std::endl;
+      std::cout << GREEN << "Final solution: subproblem status = " << status
+                << RESET << std::endl;
     }
   }
 
   void print_solution() {
-    std::cout << "=== Final Solution ===" << std::endl;
+    std::cout << GREEN << "=== Final Solution ===" << RESET << std::endl;
     for (int i = 0; i < d_.flightNumber; ++i) {
       for (int k = 0; k <= d_.gateNumber; ++k) {
         double x_val = x_[i][k].get(GRB_DoubleAttr_X);
         if (x_val > 0.5) {
-          std::cout << "Flight " << i << " assigned to gate " << k << " with x["
-                    << i << "][" << k << "] = " << x_val << std::endl;
+          std::cout << GREEN << "Flight " << i << " assigned to gate " << k
+                    << " with x[" << i << "][" << k << "] = " << x_val << RESET
+                    << std::endl;
         }
       }
     }
@@ -823,20 +847,27 @@ public:
     for (auto &[key, var] : y_) {
       double y_val = var.get(GRB_DoubleAttr_X);
       if (y_val > 0.5) {
-        std::cout << "y[{" << key.i << "," << key.j << "," << key.k
-                  << "}] = " << y_val << std::endl;
+        std::cout << GREEN << "y[{" << key.i << "," << key.j << "," << key.k
+                  << "}] = " << y_val << RESET << std::endl;
       }
     }
 
     for (auto &[key, var] : z_) {
       double z_val = var.get(GRB_DoubleAttr_X);
       if (z_val > 0.5) {
-        std::cout << "z[{" << key.i << "," << key.delta_i << "," << key.u << ","
-                  << key.v << "}] = " << z_val << std::endl;
+        if (key.u == key.v)
+          continue;
+        std::cout << GREEN << "z[{" << key.i << "," << key.delta_i << ","
+                  << key.u << "," << key.v << "}] = " << z_val << RESET
+                  << std::endl;
       }
     }
 
-    std::cout << "eta value:" << eta_.get(GRB_DoubleAttr_X) << std::endl;
+    for (int s = 0; s < eta_.size(); ++s) {
+      double eta_val = eta_[s].get(GRB_DoubleAttr_X);
+      std::cout << GREEN << "eta[" << s << "] = " << eta_val << RESET
+                << std::endl;
+    }
   }
 
   double get_objective_value() { return master_.get(GRB_DoubleAttr_ObjVal); }
@@ -872,30 +903,43 @@ private:
             for (int k = 0; k <= solver_.d_.gateNumber; ++k) {
               double x_val = getSolution(solver_.x_[i][k]);
               if (x_val > 0.5) {
-                std::cout << "x_[" << i << "][" << k << "] = " << x_val
-                          << std::endl;
+                std::cout << GREEN << "x_[" << i << "][" << k << "] = " << x_val
+                          << RESET << std::endl;
               }
             }
           }
 
           for (auto &[key, val] : y_val) {
             if (val > 0.5) {
-              std::cout << "y_val[{" << key.i << "," << key.j << "," << key.k
-                        << "}] = " << val << std::endl;
+              std::cout << GREEN << "y_val[{" << key.i << "," << key.j << ","
+                        << key.k << "}] = " << val << RESET << std::endl;
             }
           }
 
-          for (caseData &senario : senarios_) {
+          for (size_t s = 0; s < senarios_.size(); ++s) {
+            caseData &senario = senarios_[s];
+
             auto [sub_ptr, rows] =
                 solver_.build_single_senario_subproblem(senario, y_val, z_val);
-            auto [status, cut] = solver_.get_cut(*sub_ptr, rows, weight);
+
+            auto [status, cut] = solver_.get_cut(*sub_ptr, rows);
+
             if (status == GRB_INFEASIBLE) {
               addLazy(cut <= 0);
             } else if (status == GRB_OPTIMAL) {
-              RHS += cut;
+              // RHS += cut;
+              //  最优性割：获取主问题对当前场景 s 的估算值
+              double master_eta_s_val = getSolution(solver_.eta_[s]);
+              // 获取子问题算出的场景 s 的真实延误值
+              double sub_obj_s_val = sub_ptr->get(GRB_DoubleAttr_ObjVal);
+
+              if (sub_obj_s_val > master_eta_s_val + 1e-5) {
+                addLazy(solver_.eta_[s] >= cut);
+              }
             }
+            // addLazy(solver_.eta_ >= RHS);
           }
-          addLazy(solver_.eta_ >= RHS);
+
         } catch (const GRBException &e) {
           std::cerr << "Gurobi error in callback: " << e.getMessage()
                     << std::endl;
@@ -915,6 +959,7 @@ private:
   static GRBEnv createEnv(const std::string &logFile) {
     GRBEnv env(true);
     env.set("LogFile", logFile);
+    env.set(GRB_IntParam_OutputFlag, 0);
     env.start();
     return env;
   }
@@ -924,10 +969,9 @@ private:
   GRBEnv env_;
   GRBEnv sub_env_;
   GRBModel master_;
-  GRBVar eta_;
+  vector<GRBVar> eta_;
   vector<vector<GRBVar>> x_;
   vector<GRBVar> gate_used_;
-  vector<GRBVar> flight_order_;
   unordered_map<yKey, GRBVar, yKeyHash> y_;
   unordered_map<zKey, GRBVar, zKeyHash> z_;
 };
@@ -1026,21 +1070,38 @@ caseData read_case_data(const std::string &filePath) {
 
 int main() {
 
-  caseData base_case = read_case_data("D:/PYPJ/qbota/toy_data1.txt");
+  caseData base_case = read_case_data("D:/PYPJ/qbota/toy_data3.txt");
   vector<caseData> senarios = {base_case};
-  senarios.push_back(read_case_data("D:/PYPJ/qbota/toy_senario1.txt"));
-  senarios.push_back(read_case_data("D:/PYPJ/qbota/toy_senario2.txt"));
+
+  std::string senario_path = "D:/PYPJ/qbota/toy_senario3";
+  for (const auto &entry : fs::directory_iterator(senario_path)) {
+    if (entry.path().extension() == ".txt") {
+      senarios.push_back(read_case_data(entry.path().string()));
+    }
+  }
+
+  // senarios.push_back(read_case_data("D:/PYPJ/qbota/toy_senario1.txt"));
+  // senarios.push_back(read_case_data("D:/PYPJ/qbota/toy_senario2.txt"));
 
   Solver solver(base_case);
-  solver.build_master_problem();
+  solver.build_master_problem(senarios.size());
+
+  auto start_time = std::chrono::high_resolution_clock::now();
 
   solver.solve_with_callback(senarios);
 
-  std::cout << "Optimization complete." << std::endl;
-  std::cout << "Optimal objective value: " << solver.get_objective_value()
-            << std::endl;
+  std::cout << GREEN << "Optimization complete." << RESET << std::endl;
+  std::cout << GREEN
+            << "Optimal objective value: " << solver.get_objective_value()
+            << RESET << std::endl;
 
   solver.final_solution_feasibility_check(senarios[1]);
+
+  auto end_time = std::chrono::high_resolution_clock::now();
+
+  std::chrono::duration<double> elapsed = end_time - start_time;
+  std::cout << GREEN << "Total elapsed time: " << elapsed.count() << " seconds"
+            << RESET << std::endl;
 
   return 0;
 }
