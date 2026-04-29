@@ -199,10 +199,13 @@ public:
       : d_(standard), env_(createEnv("gate_assignment.log")), master_(env_),
         sub_env_(createEnv("gate_assignment_sub.log")) {}
 
-  void build_master_problem(int senarios_num) {
+  void build_master_problem(const vector<caseData> &senarios) {
     int flight_number = d_.flightNumber;
     int gate_number = d_.gateNumber;
     const auto &no_depart_arr = d_.noDepartArr;
+
+    master_.set(GRB_DoubleParam_TimeLimit, 3600.0); // 设置时间限制
+    master_.set(GRB_DoubleParam_MIPGap, 0.02);      // 设置 MIP gap
 
     x_.resize(flight_number, vector<GRBVar>(gate_number + 1));
     // 决策变量 x[i][j]，表示航班 i 是否分配到登机口 j
@@ -252,8 +255,8 @@ public:
 
     // 非线性部分
     // eta_ = master_.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS, "eta");
-    eta_.resize(senarios_num);
-    for (int s = 0; s < senarios_num; ++s) {
+    eta_.resize(senarios.size());
+    for (size_t s = 0; s < senarios.size(); ++s) {
       eta_[s] = master_.addVar(0.0, GRB_INFINITY, 0.0, GRB_CONTINUOUS,
                                "eta_" + to_string(s));
     }
@@ -272,6 +275,37 @@ public:
           }
         }
       }
+    }
+
+    // 提前计算每个场景的必然延误下界
+
+    for (size_t s = 0; s < senarios.size(); ++s) {
+      GRBLinExpr min_delay_cost = 0.0;
+      const caseData &data = senarios[s]; // 注意：你需要把 senarios 传进
+                                          // build_master_problem 才能用
+
+      for (int i = 0; i < flight_number; ++i) {
+        for (int j = 0; j < flight_number; ++j) {
+          if (i == j)
+            continue;
+          // 如果航班 i 和 j 连飞，必定产生的延误（包括缓冲和该场景的扰动）
+          double time_i = data.flightMap.at(i).scheduled_time; //
+          // 实际降落时间最早起飞时间
+
+          double pert_j = data.departure_pert.at(j); // 后续航班的扰动
+
+          double guaranteed_delay = (time_i + d_.bufferTime + pert_j) -
+                                    d_.flightMap.at(j).scheduled_time;
+          if (guaranteed_delay > 0) {
+            for (int k = 0; k < gate_number; ++k) {
+              min_delay_cost +=
+                  guaranteed_delay * d_.delayPenaltyCost[j] * y_[{i, j, k}];
+            }
+          }
+        }
+      }
+      master_.addConstr(eta_[s] >= min_delay_cost,
+                        "MinDelayLB_" + to_string(s));
     }
 
     // 每个航班分配一个登机口或停机坪
@@ -420,9 +454,16 @@ public:
     }
 
     // obj_func += eta_;
-    double prob_weight = 1.0 / senarios_num;
-    for (int s = 0; s < senarios_num; ++s) {
+    double prob_weight = 1.0 / senarios.size();
+    for (size_t s = 0; s < senarios.size(); ++s) {
       obj_func += prob_weight * eta_[s];
+    }
+
+    // 破坏对称性
+    for (int i = 0; i < flight_number; ++i) {
+      for (int k = 0; k < gate_number; ++k) {
+        obj_func += EPS * (i + 1) * (k + 1) * x_[i][k];
+      }
     }
 
     master_.setObjective(obj_func);
@@ -669,7 +710,7 @@ public:
       row.constr =
           sub.addConstr(arrival_time[j] >= data.flightMap.at(j).scheduled_time,
                         "SubArrivalScheduledTimeConstr_" + to_string(j));
-      row.constant = static_cast<double>(d_.flightMap.at(j).scheduled_time);
+      row.constant = static_cast<double>(data.flightMap.at(j).scheduled_time);
 
       rows.push_back(row);
     }
@@ -677,10 +718,10 @@ public:
     // 3-25
     for (int j : arrival_flights) {
       Row row;
-      row.constr = sub.addConstr(arrival_delay[j] >=
-                                     arrival_time[j] -
-                                         data.flightMap.at(j).scheduled_time,
-                                 "SubArrivalDelayConstr_" + to_string(j));
+      row.constr =
+          sub.addConstr(arrival_delay[j] >=
+                            arrival_time[j] - d_.flightMap.at(j).scheduled_time,
+                        "SubArrivalDelayConstr_" + to_string(j));
 
       row.constant = -static_cast<double>(d_.flightMap.at(j).scheduled_time);
 
@@ -730,7 +771,7 @@ public:
     for (const auto &row : rows) {
       GRBLinExpr expr = 0.0;
       double lambda_i = -row.constr.get(GRB_DoubleAttr_FarkasDual);
-      if (fabs(lambda_i) < 1e-6)
+      if (fabs(lambda_i) < EPS)
         continue;
       expr += row.constant;
       if (row.x_coeff != 0.0) {
@@ -762,7 +803,7 @@ public:
     for (const auto &row : rows) {
       GRBLinExpr expr = 0.0;
       double pi_i = row.constr.get(GRB_DoubleAttr_Pi);
-      if (fabs(pi_i) < 1e-6)
+      if (fabs(pi_i) < EPS)
         continue;
       expr += row.constant;
       if (row.x_coeff != 0.0) {
@@ -789,7 +830,7 @@ public:
     master_.setCallback(nullptr); // 取消回调
   }
 
-  void final_solution_feasibility_check(caseData &data) {
+  void final_solution_feasibility_check(caseData &senario) {
     // 取最终解
     unordered_map<yKey, double, yKeyHash> y_val;
     unordered_map<zKey, double, zKeyHash> z_val;
@@ -802,7 +843,8 @@ public:
     }
 
     //  构建子问题
-    auto [sub_ptr, rows] = build_single_senario_subproblem(data, y_val, z_val);
+    auto [sub_ptr, rows] =
+        build_single_senario_subproblem(senario, y_val, z_val);
     auto &sub = *sub_ptr; // 获取引用以便后续使用
 
     // 关闭dual reduction（保持一致）
@@ -933,7 +975,7 @@ private:
               // 获取子问题算出的场景 s 的真实延误值
               double sub_obj_s_val = sub_ptr->get(GRB_DoubleAttr_ObjVal);
 
-              if (sub_obj_s_val > master_eta_s_val + 1e-5) {
+              if (sub_obj_s_val > master_eta_s_val + solver_.EPS) {
                 addLazy(solver_.eta_[s] >= cut);
               }
             }
@@ -959,13 +1001,14 @@ private:
   static GRBEnv createEnv(const std::string &logFile) {
     GRBEnv env(true);
     env.set("LogFile", logFile);
-    env.set(GRB_IntParam_OutputFlag, 0);
+    // env.set(GRB_IntParam_OutputFlag, 0);
     env.start();
     return env;
   }
 
   caseData d_;
   int BIG_M = 100000;
+  double EPS = 1e-5;
   GRBEnv env_;
   GRBEnv sub_env_;
   GRBModel master_;
@@ -1070,10 +1113,10 @@ caseData read_case_data(const std::string &filePath) {
 
 int main() {
 
-  caseData base_case = read_case_data("D:/PYPJ/qbota/toy_data3.txt");
+  caseData base_case = read_case_data("D:/PYPJ/qbota/toy_data1.txt");
   vector<caseData> senarios = {base_case};
 
-  std::string senario_path = "D:/PYPJ/qbota/toy_senario3";
+  std::string senario_path = "D:/PYPJ/qbota/toy_senario1";
   for (const auto &entry : fs::directory_iterator(senario_path)) {
     if (entry.path().extension() == ".txt") {
       senarios.push_back(read_case_data(entry.path().string()));
@@ -1084,7 +1127,7 @@ int main() {
   // senarios.push_back(read_case_data("D:/PYPJ/qbota/toy_senario2.txt"));
 
   Solver solver(base_case);
-  solver.build_master_problem(senarios.size());
+  solver.build_master_problem(senarios);
 
   auto start_time = std::chrono::high_resolution_clock::now();
 
